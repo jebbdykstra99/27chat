@@ -605,5 +605,19 @@
         }
       ]
     }
-  ]
+  ],
+  "rail": {
+    "kind": "porch",
+    "title": "Room Brief",
+    "kicker": "The work didn’t stop",
+    "meta": "This room",
+    "footer": "Name that bar. Honor the work, not the ending.",
+    "porch": {
+      "prompt": "Name that bar",
+      "options": [
+        "A verse",
+        "A riff"
+      ]
+    }
+  }
 }
