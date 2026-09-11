@@ -617,7 +617,8 @@
       "options": [
         "A verse",
         "A riff"
-      ]
+      ],
+      "dwellMs": 9000
     }
   }
 }
