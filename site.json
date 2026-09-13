@@ -606,6 +606,11 @@
       ]
     }
   ],
+  "stories": {
+    "enabled": true,
+    "maxSeconds": 15,
+    "maxBytes": 8000000
+  },
   "rail": {
     "kind": "porch",
     "title": "Room Brief",
