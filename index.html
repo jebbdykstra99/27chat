@@ -5,24 +5,24 @@
     <meta name="robots" content="noindex, nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>27chat — The work didn’t stop.</title>
-  <meta name="description" content="27chat is a quiet memorial feed for remarkable people who left at 27 — songs, poems, paintings, performances. Honor the work. Not X.com.">
+  <meta name="description" content="27chat is a room about unfinished work — songs, poems, paintings, performances that still play. The work didn’t stop. Not X.com.">
   <link rel="canonical" href="https://27chat.com/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://27chat.com/">
   <meta property="og:title" content="27chat — The work didn’t stop.">
-  <meta property="og:description" content="Memorial conversation about the work. Dummy feed. Not a curse shrine. Not X.com.">
+  <meta property="og:description" content="Conversation about the work that still plays. Preview feed. Not X.com.">
   <meta property="og:image" content="https://27chat.com/og.png">
   <meta name="twitter:image" content="https://27chat.com/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="27chat — The work didn’t stop.">
-  <meta name="twitter:description" content="Memorial conversation about the work. Dummy feed. Not a curse shrine. Not X.com.">
+  <meta name="twitter:description" content="Conversation about the work that still plays. Preview feed. Not X.com.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css?v=13">
-  <link rel="preload" href="site.json?v=2" as="fetch" crossorigin="anonymous">
+  <link rel="preload" href="site.json?v=3" as="fetch" crossorigin="anonymous">
 </head>
 <body>
 <div class="preview-banner" role="status">Preview only. Accounts are not open.</div>
@@ -110,7 +110,9 @@
       <span>&middot;</span>
       <a href="privacy.html">Privacy</a>
       <span>&middot;</span>
-      <span>Preview</span>
+      <a href="about.html">About</a>
+      <span>&middot;</span>
+      <span>Unofficial · about the work · not a club</span>
     </div>
   </nav>
 </aside>
@@ -199,7 +201,7 @@
   </div>
   <div class="profile-signin-prompt" id="profile-signin-prompt">
     <h2>See your listening profile</h2>
-    <p>Sign in with email to set a handle and talk about the work. Guest is browse-only. Memorial of the work, not a curse shrine.</p>
+    <p>Sign in with email to set a handle and talk about the work. Guest is browse-only.</p>
     <button class="accent-btn" id="profile-signin-prompt-btn" type="button">Sign in</button>
   </div>
   <div class="profile-content" id="profile-content" hidden>
@@ -212,7 +214,7 @@
       <div class="profile-display-name" id="profile-display-name">Guest</div>
       <div class="profile-handle" id="profile-handle">@guest27</div>
       <p class="profile-bio" id="profile-bio">Still listening. The work didn’t stop.</p>
-      <div class="profile-meta" id="profile-meta">Memorial conversation — unofficial</div>
+      <div class="profile-meta" id="profile-meta">Unofficial · about the work</div>
       <div class="profile-counts">
         <button type="button" class="count-btn" disabled><strong>—</strong> Following <span class="tab-soon">Soon</span></button>
         <button type="button" class="count-btn" disabled><strong>—</strong> Followers <span class="tab-soon">Soon</span></button>
@@ -298,7 +300,7 @@
   </div>
   <div class="right-panel-body" id="news-feed"></div>
   <div class="right-panel-footer">
-    <p>Name that bar. Honor the work, not the ending.</p>
+    <p>Name that bar. Name that bar. Talk about what still plays.</p>
   </div>
 </aside>
 
@@ -350,7 +352,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
-  <script src="factory.js?v=26" data-site="site.json?v=2"></script>
+  <script src="factory.js?v=26" data-site="site.json?v=3"></script>
   <script type="module" src="https://cdn.jsdelivr.net/npm/emoji-picker-element@1/index.js"></script>
 </body>
 </html>
