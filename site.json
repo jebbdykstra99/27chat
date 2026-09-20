@@ -66,7 +66,7 @@
     {
       "tag": "On the page",
       "headline": "The Soldier",
-      "snippet": "Rupert Brooke sonnet. Some corner of a foreign field. The poem is the monument.",
+      "snippet": "Rupert Brooke sonnet. Some corner of a foreign field. The poem still stands.",
       "meta": "Poem"
     },
     {
@@ -96,7 +96,7 @@
     {
       "tag": "Work",
       "title": "Piece of My Heart",
-      "snippet": "Janis Joplin voice. Texas grain, Big Brother lift. The take is the monument."
+      "snippet": "Janis Joplin voice. Texas grain, Big Brother lift. The take still holds."
     },
     {
       "tag": "Work",
@@ -171,94 +171,94 @@
   ],
   "topics": [
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Robert Johnson",
-      "snippet": "Delta blues. Cross Road Blues. The 1936 sides. Guitar that still sits between the verses."
+      "snippet": "Cross Road Blues. The 1936 sides. Guitar that still sits between the verses."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Brian Jones",
-      "snippet": "Founded the Rolling Stones. Slide, marimba, the early palette. The band starts here."
+      "snippet": "Early Stones palette — slide, marimba. The founding sound, not the folklore."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Jimi Hendrix",
-      "snippet": "Electric guitar. Are You Experienced. Feedback as composition, not noise."
+      "snippet": "Are You Experienced. Feedback as composition, not noise."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Janis Joplin",
-      "snippet": "Voice. Piece of My Heart. Texas grain that fills a hall without asking."
+      "snippet": "Piece of My Heart. Texas grain that fills a hall without asking."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Jim Morrison",
-      "snippet": "The Doors. Poet. The long song as a room you can still enter."
+      "snippet": "The Doors — the long song as a room you can still enter. Poet first tonight."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Ron Pigpen McKernan",
-      "snippet": "Grateful Dead blues. Organ, shout, Love Light. The blues was the first language."
+      "snippet": "Turn On Your Love Light. Organ, shout — blues as the first language."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Alan Blind Owl Wilson",
-      "snippet": "Canned Heat. Harmonica, On the Road Again, Going Up the Country."
+      "snippet": "On the Road Again. Harmonica that sits in front of the beat."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Pete Ham",
-      "snippet": "Badfinger. Without You. Melody first. The chorus still opens."
+      "snippet": "Without You. Melody first. The chorus still opens."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Chris Bell",
-      "snippet": "Big Star. Thirteen. I Am the Cosmos. Memphis power pop with a private sky."
+      "snippet": "Thirteen / I Am the Cosmos. Memphis power pop with a private sky."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "D. Boon",
-      "snippet": "Minutemen. History Lesson Part II. Guitar as a sentence. We jam econo."
+      "snippet": "History Lesson — Part II. Guitar as a sentence. We jam econo."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Jean-Michel Basquiat",
-      "snippet": "Paintings. Crowns, lists, oilstick. The wall still answers."
+      "snippet": "Crowns, lists, oilstick. The wall still answers."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Kurt Cobain",
-      "snippet": "Nirvana. Nevermind. Quiet-loud. The song is the architecture."
+      "snippet": "Nevermind / Lithium. Quiet-loud as architecture. The tape still has air."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Kristen Pfaff",
-      "snippet": "Hole. Bass on Live Through This. The low end that carries the room."
+      "snippet": "Live Through This (bass). The low end that carries the room."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Amy Winehouse",
-      "snippet": "Back to Black. Voice and arrangement. The Ronettes in the room with her."
+      "snippet": "Back to Black. Strings, backbeat, a voice that writes its own room."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Rupert Brooke",
-      "snippet": "The Soldier. A sonnet that still stands without extra myth around it."
+      "snippet": "The Soldier. The sonnet still stands without extra myth."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Anton Yelchin",
-      "snippet": "Actor. Star Trek Chekov. Indie film close-ups. The take is the work."
+      "snippet": "Star Trek Chekov / Like Crazy. The take is still on the reel."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Jacob Miller",
-      "snippet": "Reggae. Inner Circle. Tenement Yard. The phrasing still walks."
+      "snippet": "Tenement Yard. Reggae that walks. Kingston in the phrasing."
     },
     {
-      "tag": "Person",
+      "tag": "Voice",
       "title": "Kim Jong-hyun",
-      "snippet": "SHINee. Writer and voice. Replay. The song is still a letter."
+      "snippet": "Replay / SHINee. Writing and falsetto — the song still arrives like a letter."
     }
   ],
   "seedNote": "sample — not mixed into the live feed",
@@ -339,7 +339,7 @@
       "id": "p7",
       "name": "Pearl Voice",
       "handle": "pearlvoice",
-      "text": "Janis Joplin voice. Piece of My Heart. Texas grain that fills a hall without asking. The take is the monument. Dummy chatter about a real throat.",
+      "text": "Janis Joplin voice. Piece of My Heart. Texas grain that fills a hall without asking. The take still holds. Dummy chatter about a real throat.",
       "hours": 7,
       "likes": 203,
       "replies": 44,
@@ -437,7 +437,7 @@
       "id": "p16",
       "name": "The Soldier",
       "handle": "thesoldier",
-      "text": "Rupert Brooke, The Soldier. If I should die, think only this of me. The sonnet is the monument. 1914 lines that still stand without extra folklore around them.",
+      "text": "Rupert Brooke, The Soldier. If I should die, think only this of me. The sonnet still stands. 1914 lines that still stand without extra folklore around them.",
       "hours": 22,
       "likes": 84,
       "replies": 14,
@@ -616,7 +616,7 @@
     "title": "Room Brief",
     "kicker": "The work didn't stop",
     "meta": "This room",
-    "footer": "Name that bar. Honor the work, not the ending.",
+    "footer": "Name that bar. Talk about what still plays. Unofficial · about the work · not a club · not a shrine",
     "porch": {
       "prompt": "Name that bar",
       "options": [
