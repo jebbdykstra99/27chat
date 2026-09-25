@@ -624,6 +624,22 @@
         "A riff"
       ],
       "dwellMs": 9000
-    }
+    },
+    "outbound": [
+      {
+        "tag": "Board",
+        "headline": "Recording Registry",
+        "url": "https://www.loc.gov/programs/national-recording-preservation-board/recording-registry/complete-national-recording-registry-listing/",
+        "snippet": "LOC National Recording Registry complete listing (incl. Are You Experienced). Work board, not a death timeline.",
+        "meta": "Official · board"
+      },
+      {
+        "tag": "Watch",
+        "headline": "Are You Experienced",
+        "url": "https://open.spotify.com/album/7rSZXXHHvIhF4yUFdaOCy9",
+        "snippet": "Official Spotify album page. Outbound only — no in-app re-stream. Work-first / no Club 27 memorial.",
+        "meta": "Official · link-out"
+      }
+    ]
   }
 }
