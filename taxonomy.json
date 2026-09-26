@@ -1,0 +1,87 @@
+{
+  "siteId": "27chat",
+  "domain": "27chat.com",
+  "taxonomyName": "The work",
+  "topics": [
+    {
+      "id": "studio",
+      "label": "Studio practice",
+      "kind": "theme",
+      "blurb": "Making work",
+      "followDefault": true,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "deadlines",
+      "label": "Deadlines",
+      "kind": "theme",
+      "blurb": "Shipping",
+      "followDefault": true,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "collab",
+      "label": "Collaboration",
+      "kind": "theme",
+      "blurb": "Working with others",
+      "followDefault": false,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "craft",
+      "label": "Craft",
+      "kind": "theme",
+      "blurb": "Skill & form",
+      "followDefault": true,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "money",
+      "label": "Money & rates",
+      "kind": "theme",
+      "blurb": "Getting paid",
+      "followDefault": false,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "tools",
+      "label": "Tools",
+      "kind": "theme",
+      "blurb": "What you use",
+      "followDefault": false,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "rest",
+      "label": "Rest",
+      "kind": "theme",
+      "blurb": "Sustainable pace",
+      "followDefault": false,
+      "adminSeed": true,
+      "status": "active"
+    },
+    {
+      "id": "critique",
+      "label": "Critique",
+      "kind": "theme",
+      "blurb": "Feedback culture",
+      "followDefault": true,
+      "adminSeed": true,
+      "status": "active"
+    }
+  ],
+  "topicCount": 8,
+  "defaultWatchlist": [
+    "studio",
+    "deadlines",
+    "craft",
+    "critique"
+  ],
+  "notes": "adminSeed topics are factory pre-populated. Users may unfollow (remove from their list) or follow more from the full taxonomy. Admins may retire topics (status=retired) or add new ones; user lists stay editable."
+}
