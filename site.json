@@ -643,16 +643,88 @@
     ]
   },
   "taxonomy": {
-    "version": 1,
+    "version": 2,
     "name": "The work",
     "symbolPrefix": "$",
     "topics": [
+      {
+        "id": "jimi-hendrix",
+        "label": "Jimi Hendrix",
+        "kind": "other",
+        "blurb": "Are You Experienced. Feedback as composition, not noise.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "janis-joplin",
+        "label": "Janis Joplin",
+        "kind": "other",
+        "blurb": "Piece of My Heart. Texas grain that fills a hall without asking.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "amy-winehouse",
+        "label": "Amy Winehouse",
+        "kind": "other",
+        "blurb": "Back to Black. Strings, backbeat, a voice that writes its own room.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "kurt-cobain",
+        "label": "Kurt Cobain",
+        "kind": "other",
+        "blurb": "Nevermind / Lithium. Quiet-loud as architecture. The tape still has air.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "jim-morrison",
+        "label": "Jim Morrison",
+        "kind": "other",
+        "blurb": "The Doors — the long song as a room you can still enter. Poet first.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "brian-jones",
+        "label": "Brian Jones",
+        "kind": "other",
+        "blurb": "Early Stones palette — slide, marimba. The founding sound.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "robert-johnson",
+        "label": "Robert Johnson",
+        "kind": "other",
+        "blurb": "Cross Road Blues. The 1936 sides. Guitar between the verses.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "jean-michel-basquiat",
+        "label": "Jean-Michel Basquiat",
+        "kind": "other",
+        "blurb": "Crowns, lists, oilstick. The wall still answers.",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
       {
         "id": "studio",
         "label": "Studio practice",
         "kind": "theme",
         "blurb": "Making work",
-        "followDefault": true,
+        "followDefault": false,
         "adminSeed": true,
         "status": "active"
       },
@@ -661,7 +733,7 @@
         "label": "Deadlines",
         "kind": "theme",
         "blurb": "Shipping",
-        "followDefault": true,
+        "followDefault": false,
         "adminSeed": true,
         "status": "active"
       },
@@ -679,7 +751,7 @@
         "label": "Craft",
         "kind": "theme",
         "blurb": "Skill & form",
-        "followDefault": true,
+        "followDefault": false,
         "adminSeed": true,
         "status": "active"
       },
@@ -715,19 +787,23 @@
         "label": "Critique",
         "kind": "theme",
         "blurb": "Feedback culture",
-        "followDefault": true,
+        "followDefault": false,
         "adminSeed": true,
         "status": "active"
       }
     ],
     "defaultWatchlist": [
-      "studio",
-      "deadlines",
-      "craft",
-      "critique"
+      "jimi-hendrix",
+      "janis-joplin",
+      "amy-winehouse",
+      "kurt-cobain",
+      "jim-morrison",
+      "brian-jones",
+      "robert-johnson",
+      "jean-michel-basquiat"
     ],
-    "notes": "Factory followable topics (StockTwits-style). Users keep/unfollow/add on their watchlist."
+    "notes": "adminSeed Voice Big 8 = left Watchlist pre-pop. Craft themes optional. Users unfollow freely. Nests HOLD separately."
   },
-  "v": 1,
-  "cacheBust": 1
+  "v": 6,
+  "cacheBust": 6
 }
