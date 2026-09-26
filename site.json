@@ -804,6 +804,88 @@
     ],
     "notes": "adminSeed Voice Big 8 = left Watchlist pre-pop. Craft themes optional. Users unfollow freely. Nests HOLD separately."
   },
+  "nests": [
+    {
+      "slug": "recording-registry",
+      "label": "Recording Registry",
+      "parent": "archive",
+      "kind": "theme",
+      "blurb": "Work selected for preservation — catalog talk, not a memorial wall.",
+      "nav": true
+    },
+    {
+      "slug": "listening-desk",
+      "label": "Listening Desk",
+      "parent": "listening",
+      "kind": "theme",
+      "blurb": "Name the bar / take that still plays tonight.",
+      "nav": true
+    },
+    {
+      "slug": "unfinished-work",
+      "label": "Unfinished Work",
+      "parent": "listening",
+      "kind": "theme",
+      "blurb": "Demos, vaults, WIP as craft — what the take still asks.",
+      "nav": true
+    },
+    {
+      "slug": "mix-notes",
+      "label": "Mix Notes",
+      "parent": "studio",
+      "kind": "theme",
+      "blurb": "Arrangement, mix, master — how the record was built.",
+      "nav": true
+    },
+    {
+      "slug": "songcraft",
+      "label": "Songcraft",
+      "parent": "studio",
+      "kind": "theme",
+      "blurb": "Structure, lyric, melody before the plugin list.",
+      "nav": true
+    },
+    {
+      "slug": "session-floor",
+      "label": "Session Floor",
+      "parent": "studio",
+      "kind": "theme",
+      "blurb": "Players, takes, room sound — labor in the room.",
+      "nav": true
+    },
+    {
+      "slug": "vinyl-night",
+      "label": "Vinyl Night",
+      "parent": "listening",
+      "kind": "theme",
+      "blurb": "Physical media listening desk — editions that still spin.",
+      "nav": true
+    },
+    {
+      "slug": "catalog-rail",
+      "label": "Catalog Rail",
+      "parent": "archive",
+      "kind": "theme",
+      "blurb": "Discography, credits, versions — who played what.",
+      "nav": true
+    },
+    {
+      "slug": "voice-desk",
+      "label": "Voice Desk",
+      "parent": "studio",
+      "kind": "theme",
+      "blurb": "Voice as instrument — phrasing, grain, arrangement lift.",
+      "nav": true
+    },
+    {
+      "slug": "cover-craft",
+      "label": "Cover Craft",
+      "parent": "listening",
+      "kind": "theme",
+      "blurb": "Reinterpretation as labor — arrangement choices, not tribute shrine.",
+      "nav": true
+    }
+  ],
   "v": 6,
   "cacheBust": 6
 }
