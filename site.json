@@ -641,5 +641,93 @@
         "meta": "Official · link-out"
       }
     ]
-  }
+  },
+  "taxonomy": {
+    "version": 1,
+    "name": "The work",
+    "symbolPrefix": "$",
+    "topics": [
+      {
+        "id": "studio",
+        "label": "Studio practice",
+        "kind": "theme",
+        "blurb": "Making work",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "deadlines",
+        "label": "Deadlines",
+        "kind": "theme",
+        "blurb": "Shipping",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "collab",
+        "label": "Collaboration",
+        "kind": "theme",
+        "blurb": "Working with others",
+        "followDefault": false,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "craft",
+        "label": "Craft",
+        "kind": "theme",
+        "blurb": "Skill & form",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "money",
+        "label": "Money & rates",
+        "kind": "theme",
+        "blurb": "Getting paid",
+        "followDefault": false,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "tools",
+        "label": "Tools",
+        "kind": "theme",
+        "blurb": "What you use",
+        "followDefault": false,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "rest",
+        "label": "Rest",
+        "kind": "theme",
+        "blurb": "Sustainable pace",
+        "followDefault": false,
+        "adminSeed": true,
+        "status": "active"
+      },
+      {
+        "id": "critique",
+        "label": "Critique",
+        "kind": "theme",
+        "blurb": "Feedback culture",
+        "followDefault": true,
+        "adminSeed": true,
+        "status": "active"
+      }
+    ],
+    "defaultWatchlist": [
+      "studio",
+      "deadlines",
+      "craft",
+      "critique"
+    ],
+    "notes": "Factory followable topics (StockTwits-style). Users keep/unfollow/add on their watchlist."
+  },
+  "v": 1,
+  "cacheBust": 1
 }
