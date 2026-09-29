@@ -1,5 +1,6 @@
 {
   "siteId": "27chat",
+  "dms": true,
   "redditSr": "27chat",
   "name": "27chat",
   "tagline": "The work didn’t stop.",
