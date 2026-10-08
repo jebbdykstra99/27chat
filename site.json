@@ -805,7 +805,169 @@
     ],
     "notes": "adminSeed Voice Big 8 = left Watchlist pre-pop. Craft themes optional. Users unfollow freely. Nests HOLD separately."
   },
+  "nestGroups": [
+    {
+      "id": "voices",
+      "label": "The 27s",
+      "parents": [
+        "voices"
+      ]
+    },
+    {
+      "id": "work",
+      "label": "The work",
+      "parents": [
+        "archive",
+        "listening",
+        "studio"
+      ]
+    }
+  ],
   "nests": [
+    {
+      "slug": "robert-johnson",
+      "label": "Robert Johnson",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Cross Road Blues. The 1936 sides. Guitar that still sits between the verses.",
+      "nav": true
+    },
+    {
+      "slug": "brian-jones",
+      "label": "Brian Jones",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Early Stones palette — slide, marimba. The founding sound, not the folklore.",
+      "nav": true
+    },
+    {
+      "slug": "jimi-hendrix",
+      "label": "Jimi Hendrix",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Are You Experienced. Feedback as composition, not noise.",
+      "nav": true
+    },
+    {
+      "slug": "janis-joplin",
+      "label": "Janis Joplin",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Piece of My Heart. Texas grain that fills a hall without asking.",
+      "nav": true
+    },
+    {
+      "slug": "jim-morrison",
+      "label": "Jim Morrison",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "The Doors — the long song as a room you can still enter. Poet first tonight.",
+      "nav": true
+    },
+    {
+      "slug": "ron-pigpen-mckernan",
+      "label": "Ron Pigpen McKernan",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Turn On Your Love Light. Organ, shout — blues as the first language.",
+      "nav": true
+    },
+    {
+      "slug": "alan-blind-owl-wilson",
+      "label": "Alan Blind Owl Wilson",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "On the Road Again. Harmonica that sits in front of the beat.",
+      "nav": true
+    },
+    {
+      "slug": "pete-ham",
+      "label": "Pete Ham",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Without You. Melody first. The chorus still opens.",
+      "nav": true
+    },
+    {
+      "slug": "chris-bell",
+      "label": "Chris Bell",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Thirteen / I Am the Cosmos. Memphis power pop with a private sky.",
+      "nav": true
+    },
+    {
+      "slug": "d-boon",
+      "label": "D. Boon",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "History Lesson — Part II. Guitar as a sentence. We jam econo.",
+      "nav": true
+    },
+    {
+      "slug": "jean-michel-basquiat",
+      "label": "Jean-Michel Basquiat",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Crowns, lists, oilstick. The wall still answers.",
+      "nav": true
+    },
+    {
+      "slug": "kurt-cobain",
+      "label": "Kurt Cobain",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Nevermind / Lithium. Quiet-loud as architecture. The tape still has air.",
+      "nav": true
+    },
+    {
+      "slug": "kristen-pfaff",
+      "label": "Kristen Pfaff",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Live Through This (bass). The low end that carries the room.",
+      "nav": true
+    },
+    {
+      "slug": "amy-winehouse",
+      "label": "Amy Winehouse",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Back to Black. Strings, backbeat, a voice that writes its own room.",
+      "nav": true
+    },
+    {
+      "slug": "rupert-brooke",
+      "label": "Rupert Brooke",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "The Soldier. The sonnet still stands without extra myth.",
+      "nav": true
+    },
+    {
+      "slug": "anton-yelchin",
+      "label": "Anton Yelchin",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Star Trek Chekov / Like Crazy. The take is still on the reel.",
+      "nav": true
+    },
+    {
+      "slug": "jacob-miller",
+      "label": "Jacob Miller",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Tenement Yard. Reggae that walks. Kingston in the phrasing.",
+      "nav": true
+    },
+    {
+      "slug": "kim-jong-hyun",
+      "label": "Kim Jong-hyun",
+      "parent": "voices",
+      "kind": "people",
+      "blurb": "Replay / SHINee. Writing and falsetto — the song still arrives like a letter.",
+      "nav": true
+    },
     {
       "slug": "recording-registry",
       "label": "Recording Registry",
@@ -887,6 +1049,6 @@
       "nav": true
     }
   ],
-  "v": 6,
-  "cacheBust": 6
+  "v": 7,
+  "cacheBust": 7
 }
