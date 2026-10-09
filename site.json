@@ -1,7 +1,6 @@
 {
   "siteId": "27chat",
   "dms": true,
-  "redditSr": "27chat",
   "name": "27chat",
   "tagline": "The work didn’t stop.",
   "composePlaceholder": "What still plays?",
@@ -1050,5 +1049,7 @@
     }
   ],
   "v": 7,
-  "cacheBust": 7
+  "cacheBust": 7,
+  "pixel": false,
+  "redditCrosspost": false
 }
