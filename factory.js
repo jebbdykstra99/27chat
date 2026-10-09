@@ -1,13 +1,31 @@
+/* SubX factory.js (subx-factory master). DO NOT EDIT IN A ROOM REPO.
+ * Source: github.com/jebbdykstra99/subx-factory  (version + sha256 in the room's FACTORY.lock)
+ * Room differences belong in site.json (features, skin, rail, nests, minAge) or in EXCEPTIONS.md. */
 (function () {
   'use strict';
 
   const MOBILE_NAV_MQ = 900;
-  const LS_USER = '415chat.user';
-  const LS_LIKES = '415chat.likes';
+  const LS_USER = 'subx.user';
+  const LS_LIKES = 'subx.likes';
+  // One-time migration from the per-room keys older stamps used (<room>.user / <room>.likes).
+  try {
+    if (!localStorage.getItem(LS_USER) || !localStorage.getItem(LS_LIKES)) {
+      for (var lsI = 0; lsI < localStorage.length; lsI++) {
+        var lsK = localStorage.key(lsI) || '';
+        if (!localStorage.getItem(LS_USER) && /^[a-z0-9-]+\.user$/.test(lsK) && lsK !== LS_USER) localStorage.setItem(LS_USER, localStorage.getItem(lsK));
+        if (!localStorage.getItem(LS_LIKES) && /^[a-z0-9-]+\.likes$/.test(lsK) && lsK !== LS_LIKES) localStorage.setItem(LS_LIKES, localStorage.getItem(lsK));
+      }
+    }
+  } catch (eLs) {}
   const SITE_JSON_URL = (document.currentScript && document.currentScript.getAttribute('data-site')) || 'site.json';
 
-  let SITE_ID = '415chat';
+  let SITE_ID = '';  // set from site.json siteId in boot()
   let site = null;
+  const LS_TOPIC_FOLLOWS = 'subx.topicFollows';
+  let dmSendInFlight = false;
+  let focusedTopicId = '';
+  let watchlistPickerOpen = false;
+  let watchlistQuery = '';
   let COLORS = ['#0b1c2c', '#1b6b73', '#c0362c', '#2a4a62', '#8a3b32', '#345c6e'];
   let TRENDS = [];
   let PLACES = [];
@@ -51,28 +69,742 @@
   let activeConvId = null;
   let pendingPeer = null;
   let viewingProfile = null;
+  let followingUids = {};
+  let followingUnsub = null;
+  let followingReady = false;
+  let followingError = null;
+  let followWriteInFlight = false;
+  let notifItems = [];
+  let notifsUnsub = null;
+  let notifsReady = false;
+  let notifsError = null;
+  let notifTab = 'all';
   const ADMIN_UID = 'o774wL9hUVSi19EkDCgLqQomP8i2';
   const DM_TEXT_MAX = 1000;
 
-  try {
-    firebase.initializeApp({
-    apiKey: "AIzaSyD4CgKQTylEy03Lh9Uhe9UVloyrKaK3bdY",
-    authDomain: "subx-skins.firebaseapp.com",
-    projectId: "subx-skins",
-    storageBucket: "subx-skins.firebasestorage.app",
-    messagingSenderId: "869847405863",
-    appId: "1:869847405863:web:26f902efb9a4ee0b7c0502"
+  const FB_WEB_CONFIG_URL = 'https://subx-skins.web.app/firebase-web-config.json';
+
+  function initFirebaseFromHostedConfig() {
+    return fetch(FB_WEB_CONFIG_URL, { credentials: 'omit' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Firebase web config HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (cfg) {
+        if (!cfg || !cfg.apiKey || !cfg.projectId || !cfg.appId) {
+          throw new Error('Firebase web config incomplete');
+        }
+        firebase.initializeApp({
+          apiKey: cfg.apiKey,
+          authDomain: cfg.authDomain,
+          projectId: cfg.projectId,
+          storageBucket: cfg.storageBucket,
+          messagingSenderId: cfg.messagingSenderId,
+          appId: cfg.appId
+        });
+        fbAuth = firebase.auth();
+        var persist = Promise.resolve();
+        try {
+          persist = fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL) || Promise.resolve();
+        } catch (ePersist) { console.warn('auth persistence', ePersist); }
+        fbDb = firebase.firestore();
+        fbStorage = firebase.storage();
+        try {
+          if (cfg.appCheckSiteKey) firebase.appCheck().activate(cfg.appCheckSiteKey, true);
+        } catch (e2) { console.warn('app-check', e2); }
+        return Promise.resolve(persist).catch(function (ePersist) {
+          console.warn('auth persistence', ePersist);
+        });
+      })
+      .catch(function (e) { console.warn('subx-skins init', e); });
+  }
+
+  var fbReadyPromise = initFirebaseFromHostedConfig();
+
+  function runWithAuth(errEl, fn) {
+    var go = function () {
+      if (!fbAuth) {
+        if (errEl) {
+          errEl.textContent = 'Auth is not ready.';
+          errEl.classList.add('show');
+        }
+        return;
+      }
+      fn();
+    };
+    if (fbAuth) go();
+    else fbReadyPromise.then(go);
+  }
+
+  // ===== PREVIEW-LIFT (guards/privacy/steward) =====
+  // Port this block plus the call sites named in the PR. A room joins guardedSite
+  // only after its factory.js carries guardedPostWrite + the DM lastMsgAt batch.
+  var HANDLE_EXACT = { mod: 1, mods: 1, staff: 1, support: 1, steward: 1, system: 1, root: 1, team: 1 };
+  var guardState = { rate: null, unsub: null, lastPostMs: 0, lastMsgMs: 0, sending: false };
+  var guardTick = null;
+  var reportItems = [];
+  var reportsUnsub = null;
+  var reportedMem = {};
+  var previewLiftWired = false;
+
+  function isAdminUser() {
+    return liveUid() === ADMIN_UID;
+  }
+  function siteMinAge() {
+    var n = parseInt(site && site.minAge, 10);
+    if (!isFinite(n) || n < 1) return 13;
+    return n;
+  }
+  function ageGateMessage() {
+    return 'Confirm you are ' + siteMinAge() + ' or older and agree to the preview Terms and Privacy pages.';
+  }
+  function paintAgeLabels() {
+    var n = String(siteMinAge());
+    ['cv-google-age', 'cv-reg-age'].forEach(function (id) {
+      var input = document.getElementById(id);
+      var span = input && input.parentNode && input.parentNode.querySelector('span');
+      if (!span) return;
+      span.innerHTML = span.innerHTML.replace(/I am \d+ or older/g, 'I am ' + n + ' or older');
     });
-    fbAuth = firebase.auth();
+  }
+  function nameOk(n) {
+    if (typeof n !== 'string') return false;
+    var s = n.trim();
+    if (!s || s.length > 50) return false;
+    if (/\b(admin|administrator|moderator|mod team|official|staff|support team|steward)\b/i.test(s)) return false;
+    if (/\b(adm1n|4dmin|0fficial|st3ward)\b/i.test(s)) return false;
+    if (/аdmin|аdministrator|οfficial|оfficial/i.test(s)) return false;
+    return true;
+  }
+  function handleOk(h) {
+    return typeof h === 'string'
+      && /^[a-z0-9_]{1,15}$/.test(h)
+      && !HANDLE_EXACT[h]
+      && !/^(admin|moderator|official|subx|jebb)/.test(h)
+      && !/(adm1n|4dmin|0fficial|st3ward)/.test(h);
+  }
+  function fourDigits() {
+    var s = String(Math.floor(Math.random() * 10000));
+    while (s.length < 4) s = '0' + s;
+    return s;
+  }
+  function handleFromName(name) {
+    var h = String(name || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 15);
+    if (!h) h = 'fan';
+    if (handleOk(h)) return h;
+    var digits = fourDigits();
+    var withDigits = (h + digits).slice(0, 15);
+    if (handleOk(withDigits)) return withDigits;
+    var prefixed = ('f' + digits + h).replace(/[^a-z0-9_]/g, '').slice(0, 15);
+    if (handleOk(prefixed)) return prefixed;
+    return ('fan' + digits).slice(0, 15);
+  }
+  function fanNameStored(uid) {
+    var key = 'subx.fanName.v1.' + String(uid || 'anon');
     try {
-      fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-    } catch (ePersist) { console.warn('auth persistence', ePersist); }
-    fbDb = firebase.firestore();
-    fbStorage = firebase.storage();
+      var existing = localStorage.getItem(key);
+      if (existing && nameOk(existing)) return existing;
+      var n = 'Fan ' + fourDigits();
+      localStorage.setItem(key, n);
+      return n;
+    } catch (e) {
+      return 'Fan ' + fourDigits();
+    }
+  }
+  function usableDisplayName(user) {
+    var display = String((user && user.displayName) || '').trim();
+    if (!display || display.indexOf('@') !== -1) return '';
+    return display;
+  }
+  function emailPrefixShowing(user) {
+    var email = String((user && user.email) || '');
+    var at = email.indexOf('@');
+    if (at <= 0) return false;
+    var local = email.slice(0, at);
+    var name = usableDisplayName(user);
+    return !!name && name.toLowerCase() === local.toLowerCase();
+  }
+  function memberIdentity(user, typedName) {
+    var typed = String(typedName || '').trim();
+    if (typed) {
+      return { name: typed, handle: handleFromName(typed), minted: false, emailPrefixShowing: false };
+    }
+    var display = usableDisplayName(user);
+    if (display) {
+      return {
+        name: display,
+        handle: handleFromName(display),
+        minted: false,
+        emailPrefixShowing: emailPrefixShowing(user)
+      };
+    }
+    var fan = fanNameStored(user && user.uid);
+    return { name: fan, handle: handleFromName(fan), minted: true, emailPrefixShowing: false };
+  }
+  function authorForWrite(live) {
+    if (currentUser && currentUser.live && currentUser.name && live && currentUser.uid === live.uid) {
+      return { name: currentUser.name, handle: currentUser.handle || handleFromName(currentUser.name) };
+    }
+    return memberIdentity(live);
+  }
+  function ensurePublicProfile(user, typedName, extra) {
+    if (!fbDb || !user) return Promise.resolve();
+    var typed = String(typedName || '').trim();
+    if (typed && !nameOk(typed)) return Promise.reject(new Error('That display name is reserved.'));
+    var idn = memberIdentity(user, typed);
+    var data = { siteId: SITE_ID };
+    var src = extra || {};
+    Object.keys(src).forEach(function (k) {
+      if (k === 'email' || k === 'phone' || k === 'phoneNumber') return;
+      data[k] = src[k];
+    });
+    if (!idn.emailPrefixShowing) data.displayName = idn.name;
+    var chain = Promise.resolve();
+    if (!idn.emailPrefixShowing && user.updateProfile && String(user.displayName || '') !== idn.name) {
+      chain = user.updateProfile({ displayName: idn.name });
+    }
+    return chain.then(function () {
+      return fbDb.collection('users').doc(user.uid).set(data, { merge: true });
+    });
+  }
+  function persistMintedName(user, name) {
+    if (!user || !name) return;
+    ensurePublicProfile(user, name).catch(function (e) { console.warn('fan name', e); });
+  }
+  function ensurePreviewLiftCss() {
+    if (document.getElementById('preview-lift-css')) return;
+    var st = document.createElement('style');
+    st.id = 'preview-lift-css';
+    st.textContent =
+      '.name-prefix-nudge{margin:0.7rem 1rem 0;padding:0.75rem 0.9rem;display:flex;gap:0.6rem;align-items:flex-start;' +
+        'background:var(--surface,#111);color:var(--text,#f4f4f4);border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;font-size:0.86rem;}' +
+      '.name-prefix-nudge[hidden],.name-prompt[hidden]{display:none!important;}' +
+      '.name-prefix-nudge-copy{flex:1;}' +
+      '.name-prefix-nudge-link,.name-prefix-nudge-x{background:transparent;border:1px solid var(--border,rgba(255,255,255,0.18));color:inherit;border-radius:8px;cursor:pointer;}' +
+      '.name-prefix-nudge-link{margin-left:0.35rem;padding:0.15rem 0.5rem;font:inherit;font-weight:600;}' +
+      '.name-prefix-nudge-x{width:1.7rem;height:1.7rem;}' +
+      '.name-prompt{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:1rem;}' +
+      '.name-prompt-card{background:var(--surface,#111);color:var(--text,#f4f4f4);border-radius:12px;padding:1rem;width:min(22rem,100%);}' +
+      '.name-prompt-card input{width:100%;margin:0.5rem 0;padding:0.45rem 0.6rem;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;}' +
+      '.name-prompt-err{min-height:1.1rem;color:var(--accent,#e10600);font-size:0.8rem;}' +
+      '.name-prompt-actions{display:flex;justify-content:flex-end;gap:0.5rem;margin-top:0.4rem;}' +
+      '.post-menu{position:relative;margin-left:auto;}' +
+      '.post-menu-pop{position:absolute;right:0;top:100%;z-index:5;background:var(--surface,#111);border:1px solid var(--border,#333);border-radius:8px;padding:0.25rem;min-width:8rem;}' +
+      '#nav-reports{cursor:pointer;width:100%;background:none;border:0;font:inherit;text-align:left;}';
+    document.head.appendChild(st);
+  }
+  function showEmailPrefixNudge(uid) {
+    try { if (localStorage.getItem('subx.nameNudge.v1.' + uid) === '1') return; } catch (e) {}
+    ensurePreviewLiftCss();
+    var el = document.getElementById('name-prefix-nudge');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'name-prefix-nudge';
+      el.className = 'name-prefix-nudge';
+      el.setAttribute('role', 'status');
+      el.innerHTML =
+        '<div class="name-prefix-nudge-copy">Pick a display name (your email prefix is showing). <button type="button" class="name-prefix-nudge-link" id="name-prefix-pick">Edit</button></div>' +
+        '<button type="button" class="name-prefix-nudge-x" id="name-prefix-dismiss" aria-label="Dismiss">&times;</button>';
+      var compose = document.getElementById('thoughts-compose-wrap');
+      if (compose && compose.parentNode) compose.parentNode.insertBefore(el, compose);
+      else document.body.appendChild(el);
+    }
+    el.hidden = false;
+  }
+  function dismissEmailPrefixNudge() {
+    var uid = liveUid();
+    if (uid) { try { localStorage.setItem('subx.nameNudge.v1.' + uid, '1'); } catch (e) {} }
+    var el = document.getElementById('name-prefix-nudge');
+    if (el) el.hidden = true;
+  }
+  function openDisplayNamePrompt() {
+    ensurePreviewLiftCss();
+    var el = document.getElementById('name-prompt');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'name-prompt';
+      el.className = 'name-prompt';
+      el.innerHTML =
+        '<div class="name-prompt-card" role="dialog" aria-label="Pick a display name">' +
+          '<p>Pick a display name</p>' +
+          '<input id="name-prompt-input" maxlength="50" autocomplete="nickname" placeholder="Your name">' +
+          '<div class="name-prompt-err" id="name-prompt-err"></div>' +
+          '<div class="name-prompt-actions">' +
+            '<button type="button" id="name-prompt-cancel">Cancel</button>' +
+            '<button type="button" id="name-prompt-save">Save</button>' +
+          '</div></div>';
+      document.body.appendChild(el);
+    }
+    var err = document.getElementById('name-prompt-err');
+    if (err) err.textContent = '';
+    var input = document.getElementById('name-prompt-input');
+    if (input) {
+      input.value = '';
+      try { input.focus(); } catch (e2) {}
+    }
+    el.hidden = false;
+  }
+  function saveDisplayNamePrompt() {
+    var input = document.getElementById('name-prompt-input');
+    var err = document.getElementById('name-prompt-err');
+    var name = String((input && input.value) || '').trim();
+    var user = fbAuth && fbAuth.currentUser;
+    if (!user) { if (err) err.textContent = 'Sign in first.'; return; }
+    if (!nameOk(name)) { if (err) err.textContent = 'That display name is reserved.'; return; }
+    var handle = handleFromName(name);
+    if (!handleOk(handle)) { if (err) err.textContent = 'That handle is reserved.'; return; }
+    ensurePublicProfile(user, name).then(function () {
+      if (currentUser) {
+        currentUser.name = name;
+        currentUser.handle = handle;
+        saveJSON(LS_USER, currentUser);
+      }
+      renderSidebarAuth();
+      syncProfile();
+      dismissEmailPrefixNudge();
+      var el = document.getElementById('name-prompt');
+      if (el) el.hidden = true;
+      composeErr('Display name saved.');
+    }).catch(function (e) {
+      if (err) err.textContent = guardPublicErr(e, 'Could not save that name.');
+    });
+  }
+  function spamFree(t) {
+    return !/(bit\.ly\/|tinyurl\.com|t\.me\/|wa\.me\/|onlyfans\.com|free crypto|crypto giveaway|airdrop claim|dm me on telegram|whatsapp me)/i.test(String(t || ''));
+  }
+  function linkCount(t) {
+    var m = String(t || '').toLowerCase().match(/https?:\/\/|www\./g);
+    return m ? m.length : 0;
+  }
+  function isPermDenied(e) {
+    var code = String((e && e.code) || '');
+    var msg = String((e && e.message) || '');
+    return code === 'permission-denied' || /insufficient permissions/i.test(msg);
+  }
+  function guardPublicErr(e, fallback, kind) {
+    if (isPermDenied(e)) {
+      if (kind === 'dm') return 'Message blocked by room guard (rate limit or content rule).';
+      return 'Post blocked by room guard (rate limit or content rule).';
+    }
+    var msg = (e && e.message) ? e.message : '';
+    if (/insufficient permissions/i.test(msg)) return 'Post blocked by room guard (rate limit or content rule).';
+    return msg || fallback || 'Could not post.';
+  }
+  function tsMillis(ts) {
+    return ts && ts.toMillis ? ts.toMillis() : 0;
+  }
+  function utcMidnightTs(offsetDays) {
+    var d = new Date();
+    var dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + (offsetDays || 0)));
+    return firebase.firestore.Timestamp.fromDate(dt);
+  }
+  function rateDayEqual(rate, ts) {
+    if (!rate || !rate.day || !rate.day.toMillis || !ts || !ts.toMillis) return false;
+    return rate.day.toMillis() === ts.toMillis();
+  }
+  function utcIntoDay() {
+    return Date.now() % 86400000;
+  }
+  function nearUtcMidnight() {
+    var into = utcIntoDay();
+    var windowMs = 5 * 60 * 1000;
+    return into <= windowMs || (86400000 - into) <= windowMs;
+  }
+  function otherDayOffset() {
+    return utcIntoDay() < 12 * 3600000 ? -1 : 1;
+  }
+  function postCooldownMs() {
+    if (isAdminUser()) return 0;
+    var last = tsMillis(guardState.rate && guardState.rate.lastPostAt);
+    if (guardState.lastPostMs > last) last = guardState.lastPostMs;
+    var left = 20000 - (Date.now() - last);
+    return left > 0 ? left : 0;
+  }
+  function msgCooldownMs() {
+    var last = tsMillis(guardState.rate && guardState.rate.lastMsgAt);
+    if (guardState.lastMsgMs > last) last = guardState.lastMsgMs;
+    var left = 2000 - (Date.now() - last);
+    return left > 0 ? left : 0;
+  }
+  function postsTodayCount() {
+    if (isAdminUser()) return 0;
+    var rate = guardState.rate;
+    if (!rate) return 0;
+    if (!rateDayEqual(rate, utcMidnightTs(0))) return 0;
+    return rate.dayCount || 0;
+  }
+  function armGuardTick() {
+    if (guardTick) return;
+    guardTick = setInterval(function () {
+      if (postCooldownMs() <= 0 && msgCooldownMs() <= 0) {
+        clearInterval(guardTick);
+        guardTick = null;
+      }
+      syncPostBtn();
+      syncChatChrome();
+    }, 250);
+  }
+  function paintPostBtn(btn, text, pollReady) {
+    if (!btn) return;
+    var left = postCooldownMs();
+    if (guardState.sending || left > 0) {
+      btn.disabled = true;
+      btn.textContent = left > 0 ? ('Post · ' + Math.ceil(left / 1000) + 's') : 'Post';
+      if (left > 0) armGuardTick();
+      return;
+    }
+    btn.textContent = 'Post';
+    btn.disabled = !(text || attachedFile || pollReady);
+  }
+  function paintDmSendBtn() {
+    var sendBtn = document.getElementById('chat-send-btn');
+    if (!sendBtn || !dmsOn()) return;
+    var left = msgCooldownMs();
+    if (left > 0 && isLiveUser()) {
+      sendBtn.disabled = true;
+      sendBtn.textContent = Math.ceil(left / 1000) + 's';
+      armGuardTick();
+    }
+  }
+  function notePostCommitted() {
+    guardState.lastPostMs = Date.now();
+    var day = utcMidnightTs(0);
+    var rate = guardState.rate || {};
+    var same = rateDayEqual(rate, day);
+    guardState.rate = {
+      lastPostAt: rate.lastPostAt,
+      lastMsgAt: rate.lastMsgAt,
+      day: day,
+      dayCount: same ? (rate.dayCount || 0) + 1 : 1
+    };
+    guardState.rate.lastPostAt = { toMillis: function () { return guardState.lastPostMs; } };
+    syncPostBtn();
+  }
+  function noteMsgCommitted() {
+    guardState.lastMsgMs = Date.now();
+    syncChatChrome();
+  }
+  function listenRateLimits(uid) {
+    if (guardState.unsub) { guardState.unsub(); guardState.unsub = null; }
+    guardState.rate = null;
+    if (!fbDb || !uid) return;
+    guardState.unsub = fbDb.collection('rateLimits').doc(uid).onSnapshot(function (snap) {
+      guardState.rate = snap.exists ? (snap.data() || {}) : null;
+      syncPostBtn();
+      if (dmsOn()) syncChatChrome();
+    }, function (e) { console.warn('rateLimits', e); });
+  }
+  function postGuardMessage(doc) {
+    if (isAdminUser()) return '';
+    var left = postCooldownMs();
+    if (left > 0) return 'Wait ' + Math.ceil(left / 1000) + 's before posting again.';
+    if (postsTodayCount() >= 50) return 'Daily limit is 50 posts. Try again after UTC midnight.';
+    var text = doc && doc.text ? String(doc.text) : '';
+    if (linkCount(text) > 2) return 'Posts can include at most 2 links.';
+    if (text && !spamFree(text)) return 'That text is blocked by the room spam filter.';
+    if (!nameOk(doc.authorName || '')) return 'That display name is reserved.';
+    if (!handleOk(doc.authorHandle || '')) return 'That handle is reserved. Use letters, numbers, or underscores (max 15).';
+    return '';
+  }
+  function guardedPostWrite(doc) {
+    var msg = postGuardMessage(doc);
+    if (msg) return Promise.reject(new Error(msg));
+    if (guardState.sending) return Promise.reject(new Error('Post already sending.'));
+    guardState.sending = true;
+    function finishOk(ref) {
+      guardState.sending = false;
+      if (doc.authorUid !== ADMIN_UID) notePostCommitted();
+      return ref;
+    }
+    function finishErr(e) {
+      guardState.sending = false;
+      return Promise.reject(e);
+    }
+    if (doc.authorUid === ADMIN_UID) {
+      var aref = fbDb.collection('posts').doc();
+      return aref.set(doc).then(function () { return finishOk(aref); }).catch(finishErr);
+    }
+    function commit(offset) {
+      var batch = fbDb.batch();
+      var ref = fbDb.collection('posts').doc();
+      batch.set(ref, doc);
+      var day = utcMidnightTs(offset);
+      var same = rateDayEqual(guardState.rate, day);
+      batch.set(fbDb.collection('rateLimits').doc(doc.authorUid), {
+        lastPostAt: firebase.firestore.FieldValue.serverTimestamp(),
+        day: day,
+        dayCount: same ? firebase.firestore.FieldValue.increment(1) : 1
+      }, { merge: true });
+      return batch.commit().then(function () { return ref; });
+    }
+    return commit(0).then(finishOk).catch(function (e) {
+      if (isPermDenied(e) && nearUtcMidnight()) {
+        return commit(otherDayOffset()).then(finishOk).catch(finishErr);
+      }
+      return finishErr(e);
+    });
+  }
+  function stewardPillHtml(post) {
+    if (isSessionSeedPost(post)) return '<span class="post-steward-pill">Sample</span>';
+    if (post && post.steward) {
+      return '<span class="post-steward-pill" title="Operated by SubX using AI tools. Not a real person.">AI steward · SubX</span>';
+    }
+    if (post && post.isAdminAuthor) return '<span class="post-steward-pill">Steward</span>';
+    return '';
+  }
+  function postOverflowHtml(post) {
+    if (!post || isSessionSeedPost(post) || !post.live) return '';
+    if (liveUid() !== ADMIN_UID) return '';
+    return '<span class="post-menu"><button class="post-action" data-act="more" type="button" aria-label="More">⋯</button></span>';
+  }
+  function togglePostMenu(btn) {
+    ensurePreviewLiftCss();
+    var existing = document.getElementById('post-menu-pop');
+    if (existing) {
+      var owner = existing.parentNode;
+      existing.remove();
+      if (owner && owner.contains(btn)) return;
+    }
+    if (liveUid() !== ADMIN_UID) return;
+    var pop = document.createElement('div');
+    pop.id = 'post-menu-pop';
+    pop.className = 'post-menu-pop';
+    pop.innerHTML = '<button type="button" class="post-action" data-act="admin-remove">Remove post</button>';
+    if (btn.parentNode) btn.parentNode.appendChild(pop);
+  }
+  function adminRemovePost(id) {
+    if (liveUid() !== ADMIN_UID || !id || !fbDb) return;
+    if (!window.confirm('Remove this post from the room?')) return;
+    fbDb.collection('posts').doc(id).delete().catch(function (e) {
+      composeErr(guardPublicErr(e, 'Could not remove that post.'));
+    });
+  }
+  function alreadyReported(id) {
+    if (reportedMem[id]) return true;
     try {
-      firebase.appCheck().activate('6LffWZAtAAAAAGAXCR6JcwiXEY5FnowtegOLmElk', true);
-    } catch (e2) { console.warn('app-check', e2); }
-  } catch (e) { console.warn('subx-skins init', e); }
+      var raw = sessionStorage.getItem('subx.reported.' + SITE_ID);
+      var map = raw ? JSON.parse(raw) : {};
+      return !!map[id];
+    } catch (e) { return false; }
+  }
+  function markReported(id) {
+    reportedMem[id] = true;
+    try {
+      var key = 'subx.reported.' + SITE_ID;
+      var raw = sessionStorage.getItem(key);
+      var map = raw ? JSON.parse(raw) : {};
+      map[id] = 1;
+      sessionStorage.setItem(key, JSON.stringify(map));
+    } catch (e) {}
+  }
+  function writeReportAlert(post, me) {
+    if (!me || me === ADMIN_UID || !fbDb || !post) return;
+    var snippet = String(post.text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    fbDb.collection('users').doc(ADMIN_UID).collection('notifications').add({
+      toUid: ADMIN_UID,
+      fromUid: me,
+      type: 'report',
+      siteId: SITE_ID,
+      postId: post.id,
+      read: false,
+      text: 'Report: ' + snippet,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).catch(function (e) { console.warn('report alert', e); });
+  }
+  function unreadReportCount() {
+    var n = 0;
+    var i;
+    for (i = 0; i < reportItems.length; i++) if (!reportItems[i].status) n++;
+    return n;
+  }
+  function syncReportsEntry() {
+    var nav = document.querySelector('#sidebar nav ul');
+    var link = document.getElementById('nav-reports');
+    var admin = isLiveUser() && liveUid() === ADMIN_UID;
+    if (!admin) {
+      if (link && link.parentNode) link.parentNode.remove();
+      closeReports();
+      return;
+    }
+    ensurePreviewLiftCss();
+    if (!link && nav) {
+      var li = document.createElement('li');
+      li.innerHTML = '<button type="button" class="nav-social-link" id="nav-reports" data-reports="1">Reports <span class="nav-badge" id="reports-badge" hidden></span></button>';
+      nav.appendChild(li);
+      link = document.getElementById('nav-reports');
+    }
+    var badge = document.getElementById('reports-badge');
+    var n = unreadReportCount();
+    if (!badge) return;
+    if (n) {
+      badge.textContent = n > 9 ? '9+' : String(n);
+      badge.classList.add('visible');
+      badge.hidden = false;
+    } else {
+      badge.textContent = '';
+      badge.classList.remove('visible');
+      badge.hidden = true;
+    }
+  }
+  function listenReports() {
+    if (reportsUnsub) { reportsUnsub(); reportsUnsub = null; }
+    reportItems = [];
+    if (!fbDb || liveUid() !== ADMIN_UID) { syncReportsEntry(); return; }
+    reportsUnsub = fbDb.collection('reports').where('siteId', '==', SITE_ID).onSnapshot(function (snap) {
+      reportItems = snap.docs.map(function (doc) {
+        var d = doc.data() || {};
+        var ms = d.createdAt && d.createdAt.toMillis ? d.createdAt.toMillis() : 0;
+        return {
+          id: doc.id,
+          postId: d.postId || '',
+          reporterUid: d.reporterUid || '',
+          reason: d.reason || '',
+          status: d.status || '',
+          ms: ms
+        };
+      });
+      reportItems.sort(function (a, b) { return (b.ms || 0) - (a.ms || 0); });
+      syncReportsEntry();
+      renderReports();
+    }, function (e) { console.warn('reports', e); });
+  }
+  function ensureReportsPanel() {
+    var el = document.getElementById('reports-overlay');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'reports-overlay';
+    el.className = 'notif-overlay';
+    el.innerHTML =
+      '<button class="view-back" id="reports-back" type="button">Back</button>' +
+      '<div class="notif-header"><div class="notif-title">Reports</div></div>' +
+      '<div class="notif-list" id="reports-list"></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function openReports() {
+    if (liveUid() !== ADMIN_UID) return;
+    closeSocialOverlays();
+    var el = ensureReportsPanel();
+    el.classList.add('active');
+    renderReports();
+  }
+  function closeReports() {
+    var el = document.getElementById('reports-overlay');
+    if (el) el.classList.remove('active');
+  }
+  function reporterCount(postId) {
+    var n = 0;
+    var i;
+    for (i = 0; i < reportItems.length; i++) {
+      if (reportItems[i].postId === postId && reportItems[i].status !== 'dismissed') n++;
+    }
+    return n;
+  }
+  function renderReports() {
+    var el = document.getElementById('reports-list');
+    if (!el) return;
+    var rows = reportItems.filter(function (r) { return r.status !== 'dismissed'; }).slice(0, 50);
+    if (!rows.length) {
+      el.innerHTML = '<div class="soon-panel"><strong>No open reports.</strong></div>';
+      return;
+    }
+    el.innerHTML = rows.map(function (r) {
+      var post = findPost(r.postId);
+      var snippet = (post && post.text) ? String(post.text).replace(/\s+/g, ' ').trim().slice(0, 180) : '(post unavailable)';
+      var count = reporterCount(r.postId);
+      return '<div class="notif-item">' +
+        '<p>' + escapeHtml(snippet) + '</p>' +
+        '<p>' + count + ' reporter' + (count === 1 ? '' : 's') + '</p>' +
+        '<button type="button" class="post-action" data-report-remove="' + escapeHtml(r.postId) + '">Remove post</button> ' +
+        '<button type="button" class="post-action" data-report-dismiss="' + escapeHtml(r.id) + '">Dismiss</button>' +
+        '</div>';
+    }).join('');
+  }
+  function dismissReport(id) {
+    if (liveUid() !== ADMIN_UID || !id || !fbDb) return;
+    fbDb.collection('reports').doc(id).update({ status: 'dismissed' }).catch(function (e) {
+      composeErr(guardPublicErr(e, 'Could not dismiss that report.'));
+    });
+  }
+  function stopPreviewLift() {
+    if (guardState.unsub) { guardState.unsub(); guardState.unsub = null; }
+    guardState.rate = null;
+    guardState.lastPostMs = 0;
+    guardState.lastMsgMs = 0;
+    guardState.sending = false;
+    if (reportsUnsub) { reportsUnsub(); reportsUnsub = null; }
+    reportItems = [];
+    var nudge = document.getElementById('name-prefix-nudge');
+    if (nudge) nudge.hidden = true;
+    var prompt = document.getElementById('name-prompt');
+    if (prompt) prompt.hidden = true;
+    closeReports();
+    syncReportsEntry();
+  }
+  function wirePreviewLift() {
+    if (previewLiftWired) return;
+    previewLiftWired = true;
+    document.addEventListener('click', function (e) {
+      if (e.target.closest('#name-prefix-dismiss')) { dismissEmailPrefixNudge(); return; }
+      if (e.target.closest('#name-prefix-pick')) { openDisplayNamePrompt(); return; }
+      if (e.target.closest('#name-prompt-cancel')) {
+        var box = document.getElementById('name-prompt');
+        if (box) box.hidden = true;
+        return;
+      }
+      if (e.target.closest('#name-prompt-save')) { saveDisplayNamePrompt(); return; }
+      if (e.target.closest('[data-reports]')) {
+        e.preventDefault();
+        openReports();
+        return;
+      }
+      if (e.target.closest('#reports-back')) { closeReports(); return; }
+      var dismissBtn = e.target.closest('[data-report-dismiss]');
+      if (dismissBtn) {
+        dismissReport(dismissBtn.getAttribute('data-report-dismiss'));
+        return;
+      }
+      var removeBtn = e.target.closest('[data-report-remove]');
+      if (removeBtn) {
+        adminRemovePost(removeBtn.getAttribute('data-report-remove'));
+        return;
+      }
+      var more = e.target.closest('[data-act="more"]');
+      if (more) {
+        e.preventDefault();
+        togglePostMenu(more);
+        return;
+      }
+      var adminRemove = e.target.closest('[data-act="admin-remove"]');
+      if (adminRemove) {
+        var post = adminRemove.closest('[data-post-id]');
+        if (post) adminRemovePost(post.getAttribute('data-post-id'));
+        var pop = document.getElementById('post-menu-pop');
+        if (pop) pop.remove();
+        return;
+      }
+      if (!e.target.closest('#post-menu-pop')) {
+        var openPop = document.getElementById('post-menu-pop');
+        if (openPop) openPop.remove();
+      }
+    });
+  }
+  // ===== END PREVIEW-LIFT (guards/privacy/steward) =====
+
+  // ===== SUBX FACTORY: site.json-driven features + skin (one identical factory.js for every room) =====
+  // site.json "features": { watchlist, following, notifs, topicFollow, sessionSeeds } (all default false).
+  // DMs stay on site.json "dms" (existing). F1 rail stays on rail.kind 'f1-calendar'. Age: site.json "minAge".
+  function featureOn(name) {
+    var f = site && site.features;
+    return !!(f && f[name] === true);
+  }
+  // site.json "skin": { bioDefault, avatarInitials, profileEmpty, guestHandle, exploreEmpty, seatTag, storiesPlaceholder,
+  //   regNamePlaceholder, taglineH1:"true", keepBrandTitle:"true" } (strings). Room copy lives in site.json, never here.
+  function skin(key, fallback) {
+    var s = site && site.skin;
+    var v = s && typeof s[key] === 'string' ? s[key] : '';
+    return v || fallback;
+  }
 
   const hamburger = document.getElementById('hamburger');
   const sidebar = document.getElementById('sidebar');
@@ -85,6 +817,109 @@
   }
   function saveJSON(key, val) {
     try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* private mode */ }
+  }
+
+  function topicFollowsStoreKey() {
+    return LS_TOPIC_FOLLOWS + '.' + (SITE_ID || 'site');
+  }
+
+  function loadTopicFollows() {
+    var raw = loadJSON(topicFollowsStoreKey(), {});
+    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  }
+
+  function topicFollowSlug(s) {
+    return String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80);
+  }
+
+  function cardTopicKey(card) {
+    if (!card) return 'topic';
+    var explicit = card.followId || card.topic;
+    if (explicit) {
+      var fromExplicit = topicFollowSlug(explicit);
+      if (fromExplicit) return fromExplicit;
+    }
+    var tag = topicFollowSlug(card.tag);
+    var head = topicFollowSlug(card.headline);
+    if (tag && head) return (tag + '-' + head).slice(0, 80);
+    return tag || head || 'topic';
+  }
+
+  function isTopicFollowed(key) {
+    return !!(key && loadTopicFollows()[key]);
+  }
+
+  function setTopicFollowed(key, on) {
+    if (!key) return;
+    var map = loadTopicFollows();
+    if (on) map[key] = true;
+    else delete map[key];
+    saveJSON(topicFollowsStoreKey(), map);
+  }
+
+  function topicFollowLabel(card) {
+    return String((card && (card.tag || card.headline)) || 'topic');
+  }
+
+  function followIconSvg(on) {
+    if (on) {
+      return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
+    }
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  }
+
+  function renderFollowBtn(card) {
+    if (!featureOn('topicFollow')) return '';
+    var key = cardTopicKey(card);
+    var label = topicFollowLabel(card);
+    var on = isLiveUser() && isTopicFollowed(key);
+    var aria = (on ? 'Following ' : 'Follow ') + label;
+    return '<button type="button" class="news-follow-btn' + (on ? ' is-following' : '') +
+      '" data-topic-follow="' + escapeHtml(key) +
+      '" data-topic-label="' + escapeHtml(label) +
+      '" aria-pressed="' + (on ? 'true' : 'false') +
+      '" aria-label="' + escapeHtml(aria) +
+      '" title="' + escapeHtml(aria) + '">' +
+      followIconSvg(on) +
+      '</button>';
+  }
+
+  function paintFollowBtn(btn, on) {
+    if (!btn) return;
+    var label = btn.getAttribute('data-topic-label') || 'topic';
+    var aria = (on ? 'Following ' : 'Follow ') + label;
+    btn.classList.toggle('is-following', !!on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', aria);
+    btn.setAttribute('title', aria);
+    btn.innerHTML = followIconSvg(!!on);
+  }
+
+  function syncTopicFollowButtons() {
+    var buttons = document.querySelectorAll('[data-topic-follow]');
+    var signedIn = isLiveUser();
+    for (var i = 0; i < buttons.length; i++) {
+      var key = buttons[i].getAttribute('data-topic-follow');
+      paintFollowBtn(buttons[i], signedIn && isTopicFollowed(key));
+    }
+  }
+
+  function toggleTopicFollow(btn) {
+    if (!isLiveUser()) {
+      composeErr('Sign in to follow. Guest can only browse.');
+      openAuth('join');
+      return;
+    }
+    var key = btn && btn.getAttribute('data-topic-follow');
+    if (!key) return;
+    var next = !isTopicFollowed(key);
+    setTopicFollowed(key, next);
+    var buttons = document.querySelectorAll('[data-topic-follow="' + key + '"]');
+    for (var i = 0; i < buttons.length; i++) paintFollowBtn(buttons[i], next);
   }
 
   let currentUser = loadJSON(LS_USER, null);
@@ -127,8 +962,49 @@
   function isLiveUser() {
     return !!(fbAuth && fbAuth.currentUser);
   }
+
+  function sessionSeedList() {
+    if (!featureOn('sessionSeeds')) return [];
+    if (site && Array.isArray(site.sessionSeeds) && site.sessionSeeds.length) {
+      return site.sessionSeeds;
+    }
+    if (site && Array.isArray(site.seed)) {
+      return site.seed.filter(function (p) { return p && p.session === true; });
+    }
+    return [];
+  }
+
+  function sessionSeedPosts() {
+    var now = Date.now();
+    return sessionSeedList().map(function (p, i) {
+      var hours = (p.hours != null) ? p.hours : i;
+      return {
+        id: String(p.id || ('session-seed-' + i)),
+        authorUid: null,
+        name: p.name || 'Room',
+        handle: p.handle || 'room',
+        text: p.text || '',
+        ms: now - hours * 3600000,
+        hours: hours,
+        likedBy: {},
+        likes: p.likes || 0,
+        replies: p.replies || 0,
+        parentId: null,
+        live: false,
+        sessionSeed: true,
+        imageUrl: p.imageUrl || null,
+        poll: null
+      };
+    });
+  }
+
+  function isSessionSeedPost(post) {
+    return !!(post && post.sessionSeed);
+  }
   function findPost(id) {
     for (var i = 0; i < livePosts.length; i++) if (livePosts[i].id === id) return livePosts[i];
+    var seeds = sessionSeedPosts();
+    for (var j = 0; j < seeds.length; j++) if (seeds[j].id === id) return seeds[j];
     return null;
   }
 
@@ -137,7 +1013,7 @@
   var shareSheetPostId = null;
 
   function postPermalink(postId) {
-    var host = (location.hostname || '').replace(/^www\./i, '') || 'samochat.com';
+    var host = (location.hostname || '').replace(/^www\./i, '') || ((site && site.domain) || 'subx.it');
     return 'https://p.' + host + '/status/' + encodeURIComponent(String(postId || ''));
   }
 
@@ -285,7 +1161,9 @@
       gateErr('This room is paused.');
       return false;
     }
-    if (!isEmailVerified()) {
+    // Chat/DM replies: signed-in + not killed is enough. Google members
+    // can send without emailVerified. Post/like/vote/report/block still gate.
+    if (action !== 'chat' && !isEmailVerified()) {
       gateErr('Verify your email before you ' + (action || 'post') + '. Check your inbox, then refresh.');
       var u = fbAuth.currentUser;
       if (u && u.sendEmailVerification) u.sendEmailVerification().catch(function () {});
@@ -334,18 +1212,22 @@
   function reportPost(id) {
     if (!requireVerified('report')) return;
     var post = findPost(id);
-    if (!post || !fbDb) return;
+    if (!post || !fbDb || isSessionSeedPost(post)) return;
+    if (alreadyReported(id)) { composeErr('You already reported this post.'); return; }
+    var me = liveUid();
     fbDb.collection('reports').add({
       siteId: SITE_ID,
       postId: id,
       targetUid: post.authorUid || '',
-      reporterUid: liveUid(),
+      reporterUid: me,
       reason: 'abuse',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(function () {
+      markReported(id);
       composeErr('Reported. Thanks.');
+      writeReportAlert(post, me);
     }).catch(function (e) {
-      composeErr((e && e.message) ? e.message : 'Could not report.');
+      composeErr(guardPublicErr(e, 'Could not report.'));
     });
   }
   function blockUser(uid) {
@@ -387,18 +1269,26 @@
 
   function applySiteChrome() {
     if (!site) return;
-    var title = site.name || "415chat";
+    var title = site.name || SITE_ID || 'SubX';
     var tag = site.tagline || '';
     document.title = tag ? (title + ' — ' + tag) : title;
     var brandTitle = document.querySelector('.brand-title');
     var brandSub = document.querySelector('.brand-sub');
-    if (brandTitle) brandTitle.textContent = title;
+    var brandMark = document.querySelector('.brand-mark');
+    if (brandTitle && !(skin('keepBrandTitle', '') === 'true' && brandTitle.tagName === 'H1')) brandTitle.textContent = title;
     if (brandSub) brandSub.textContent = tag;
+    if (brandMark) brandMark.setAttribute('aria-label', title + ' home');
+    var profileSub = document.getElementById('profile-topbar-posts');
+    if (profileSub) profileSub.textContent = title + ' · ' + tag;
+    var homeH1 = document.querySelector('#page-thoughts .home-h1');
+    if (homeH1 && tag && skin('taglineH1', '') === 'true') homeH1.textContent = tag;
+    var regName = document.getElementById('cv-reg-name');
+    if (regName && skin('regNamePlaceholder', '')) regName.setAttribute('placeholder', skin('regNamePlaceholder', ''));
     var authTitle = document.getElementById('auth-title');
     if (authTitle) authTitle.textContent = 'Join ' + title;
     var authNote = document.querySelector('#cv-auth-overlay .conv-modal-note');
     if (authNote) {
-      authNote.textContent = 'Continue with Google to join ' + title + '. Email is optional. Guest is browse-only.';
+      authNote.textContent = site.trustBlurb || ('Continue with Google to join ' + title + '. Email is optional. Guest is browse-only.');
     }
     var input = document.getElementById('thoughts-compose-input');
     if (input && site.composePlaceholder) {
@@ -458,14 +1348,64 @@
     return !!(site && site.dms === true);
   }
 
+  function followingOn() {
+    return !!fbDb && featureOn('following');
+  }
+
+  function notifsOn() {
+    return !!fbDb && featureOn('notifs');
+  }
+
+  function followingLive() {
+    return !!(followingOn() && isLiveUser() && followingReady && !followingError);
+  }
+
+  function notifsLive() {
+    return !!(notifsOn() && isLiveUser() && notifsReady && !notifsError);
+  }
+
+  function paintNavSoon(el, live) {
+    if (!el) return;
+    var badge = el.querySelector('.nav-soon');
+    if (live) {
+      el.classList.remove('is-soon');
+      el.removeAttribute('data-soon');
+      if (badge) badge.remove();
+      return;
+    }
+    el.setAttribute('data-soon', '');
+    el.classList.add('is-soon');
+    if (!el.querySelector('.nav-soon')) {
+      badge = document.createElement('span');
+      badge.className = 'nav-soon';
+      badge.textContent = 'Soon';
+      el.appendChild(badge);
+    }
+  }
+
+  function syncFollowingTabSoon() {
+    var followTab = document.querySelector('[data-thoughts-tab="following"]');
+    if (!followTab) return;
+    var tabSoon = followTab.querySelector('.tab-soon');
+    if (followingLive()) {
+      if (tabSoon) tabSoon.remove();
+      return;
+    }
+    if (!tabSoon) {
+      tabSoon = document.createElement('span');
+      tabSoon.className = 'tab-soon';
+      tabSoon.textContent = 'Soon';
+      followTab.appendChild(tabSoon);
+    }
+  }
+
   function hideDummyChrome() {
+    paintNavSoon(document.getElementById('nav-chat'), dmsOn());
+    paintNavSoon(document.getElementById('nav-following'), followingLive());
+    paintNavSoon(document.getElementById('nav-notifications'), notifsLive());
     document.querySelectorAll('[data-soon]').forEach(function (el) {
-      if (dmsOn() && (el.id === 'nav-chat' || el.getAttribute('data-social') === 'chat')) {
-        el.classList.remove('is-soon');
-        var liveBadge = el.querySelector('.nav-soon');
-        if (liveBadge) liveBadge.remove();
-        return;
-      }
+      if (el.id === 'nav-chat' || el.id === 'nav-following' || el.id === 'nav-notifications') return;
+      if (el.getAttribute('data-social') === 'chat' && dmsOn()) { paintNavSoon(el, true); return; }
       el.classList.add('is-soon');
       if (!el.querySelector('.nav-soon')) {
         var badge = document.createElement('span');
@@ -474,17 +1414,24 @@
         el.appendChild(badge);
       }
     });
-    var notifBadge = document.getElementById('notif-badge');
-    if (notifBadge) {
-      notifBadge.textContent = '';
-      notifBadge.classList.remove('visible');
-      notifBadge.hidden = true;
+    syncFollowingTabSoon();
+    if (!notifsLive()) {
+      var notifBadge = document.getElementById('notif-badge');
+      if (notifBadge) {
+        notifBadge.textContent = '';
+        notifBadge.classList.remove('visible');
+        notifBadge.hidden = true;
+      }
     }
+    renderNotifs();
     document.body.classList.toggle('is-live', isLiveUser());
     document.body.classList.toggle('is-guest', !isLiveUser());
     syncEarlyWelcome();
     syncChatChrome();
+    syncTopicFollowButtons();
     syncStoriesTray();
+    renderWatchlist();
+    syncReportsEntry();
   }
 
   function earlyWelcomeOn() {
@@ -543,7 +1490,7 @@
       el.className = 'early-welcome';
       el.setAttribute('role', 'status');
       el.innerHTML =
-        '<div class="early-welcome-copy">You\'re early. This room is live but unfinished. Who do you sit with on the grid — driver, team, or both? Tell the room.</div>' +
+        '<div class="early-welcome-copy">' + escapeHtml((site && site.earlyWelcomeCopy) || 'You\'re early. This room is live but unfinished.') + '</div>' +
         '<button type="button" class="early-welcome-dismiss" id="early-welcome-dismiss" aria-label="Dismiss">&times;</button>';
       var compose = document.getElementById('thoughts-compose-wrap');
       if (compose && compose.parentNode) compose.parentNode.insertBefore(el, compose.nextSibling);
@@ -562,25 +1509,31 @@
     if (!user) return;
     var draft = peekCompose();
     var shouldLand = consumeAuthLand();
-    const raw = user.displayName || (user.email || 'member').split('@')[0];
+    var idn = memberIdentity(user);
     currentUser = {
       uid: user.uid,
-      name: raw,
-      handle: String(raw).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member',
+      name: idn.name,
+      handle: idn.handle,
       bio: '',
       live: true
     };
     saveJSON(LS_USER, currentUser);
+    if (idn.minted) persistMintedName(user, idn.name);
     closeAuth();
     renderSidebarAuth();
     hideDummyChrome();
     syncChatChrome();
     syncProfile();
     listenBlocks(user.uid);
+    listenFollowing(user.uid);
+    listenNotifs(user.uid);
     listenMemberNests(user.uid);
     listenConversations();
+    listenRateLimits(user.uid);
+    listenReports();
     restoreCompose(draft);
     if (shouldLand) landInFeedCompose();
+    if (idn.emailPrefixShowing) showEmailPrefixNudge(user.uid);
     if (!user.emailVerified) {
       composeErr('Verify your email before posting. Check your inbox, then refresh.');
     }
@@ -606,7 +1559,10 @@
       live: true,
       imageUrl: d.imageUrl || null,
       poll: d.poll || null,
-      nestSlug: d.nestSlug || ''
+      nestSlug: d.nestSlug || '',
+      topicIds: collectTopicIds(d),
+      steward: d.steward === true || d.adminSeed === true,
+      isAdminAuthor: uid === ADMIN_UID
     };
   }
 
@@ -669,7 +1625,7 @@
   }
 
   function closeSocialOverlays() {
-    ['explore-overlay', 'notif-overlay', 'chat-overlay', 'profile-overlay'].forEach(function (id) {
+    ['explore-overlay', 'notif-overlay', 'chat-overlay', 'profile-overlay', 'reports-overlay'].forEach(function (id) {
       const el = document.getElementById(id);
       if (el) el.classList.remove('active', 'thread-open');
     });
@@ -1099,8 +2055,8 @@
     });
   }
 
-  // Optional site.nestGroups: [{ label, parents: [...] }] — sub-headers in the Nests nav.
-  // Nav order stays the site.json nests order; a header prints when the group changes.
+  // Optional site.nestGroups: [{ label, parents: [...] }] prints sub-headers in the Nests nav.
+  // A nest whose parent is another nest's slug is a sub-nest (subsubX): listed right under that parent, indented.
   function nestGroupLabel(n) {
     if (!n) return null;
     if (n.user) return 'Your rooms';
@@ -1112,22 +2068,49 @@
     return null;
   }
 
+  function orderedNavNests(shown) {
+    var bySlug = {};
+    var i;
+    for (i = 0; i < shown.length; i++) bySlug[nestSlugNorm(shown[i].slug)] = shown[i];
+    var kids = {};
+    var top = [];
+    for (i = 0; i < shown.length; i++) {
+      var n = shown[i];
+      var p = n.parent ? nestSlugNorm(n.parent) : '';
+      if (p && bySlug[p] && p !== nestSlugNorm(n.slug)) {
+        (kids[p] = kids[p] || []).push(n);
+      } else {
+        top.push(n);
+      }
+    }
+    var out = [];
+    for (i = 0; i < top.length; i++) {
+      out.push({ nest: top[i], depth: 0 });
+      var ch = kids[nestSlugNorm(top[i].slug)] || [];
+      for (var c = 0; c < ch.length; c++) out.push({ nest: ch[c], depth: 1 });
+    }
+    return out;
+  }
+
   function renderNestNav() {
     ensureNestNav();
     var items = document.getElementById('nav-nests-items');
     if (!items) return;
-    var shown = visibleNests();
+    var rows = orderedNavNests(visibleNests());
     var html = '';
     var lastGroup = null;
-    for (var i = 0; i < shown.length; i++) {
-      var n = shown[i];
-      var group = nestGroupLabel(n);
-      if (group && group !== lastGroup) {
-        html += '<li class="nav-nest-group" role="presentation">' + escapeHtml(group) + '</li>';
+    for (var i = 0; i < rows.length; i++) {
+      var n = rows[i].nest;
+      if (rows[i].depth === 0) {
+        var group = nestGroupLabel(n);
+        if (group && group !== lastGroup) {
+          html += '<li class="nav-nest-group" role="presentation">' + escapeHtml(group) + '</li>';
+        }
+        lastGroup = group;
       }
-      lastGroup = group;
       var active = currentNest && currentNest.slug === n.slug ? ' active' : '';
-      html += '<li><a class="nav-social-link' + active + '" href="' + escapeHtml(nestPath(n.slug)) + '" data-nest="' + escapeHtml(n.slug) + '">' +
+      var child = rows[i].depth ? ' nav-nest-child' : '';
+      html += '<li><a class="nav-social-link' + active + child + '" href="' + escapeHtml(nestPath(n.slug)) + '" data-nest="' + escapeHtml(n.slug) + '">' +
         escapeHtml(n.label || n.slug) + '</a></li>';
     }
     items.innerHTML = html;
@@ -1236,6 +2219,10 @@
   }
 
   function selectThoughtsTab(tab) {
+    if (focusedTopicId) {
+      focusedTopicId = '';
+      renderWatchlist();
+    }
     currentTab = tab;
     document.querySelectorAll('[data-thoughts-tab]').forEach(function (t) {
       t.classList.toggle('active', t.dataset.thoughtsTab === tab);
@@ -1249,6 +2236,24 @@
     applyNestChrome();
     const raw = routeFromHash();
     var roomHighlight = currentNest ? currentNest.slug : 'home';
+    var topicMatch = /^topic\/([a-z0-9-]{1,80})$/.exec(raw);
+    if (topicMatch) {
+      focusedTopicId = topicMatch[1];
+      closeSocialOverlays();
+      showContentPage('thoughts');
+      highlightSocial(roomHighlight);
+      currentTab = 'foryou';
+      document.querySelectorAll('[data-thoughts-tab]').forEach(function (t) {
+        t.classList.toggle('active', t.dataset.thoughtsTab === 'foryou');
+      });
+      renderWatchlist();
+      renderFeed();
+      return;
+    }
+    if (focusedTopicId) {
+      focusedTopicId = '';
+      renderWatchlist();
+    }
 
     if (raw === 'following') {
       closeSocialOverlays();
@@ -1339,11 +2344,12 @@
         '<div class="post-avatar" style="background:' + bg + '">' + av + '</div>' +
         '<div class="post-body">' +
           '<div class="post-meta">' +
-            '<span class="post-name' + (dmsOn() && post.authorUid ? ' post-name-link' : '') + '"' +
-              (dmsOn() && post.authorUid
+            '<span class="post-name' + (canOpenProfile(post) ? ' post-name-link' : '') + '"' +
+              (canOpenProfile(post)
                 ? ' data-profile-uid="' + escapeHtml(post.authorUid) + '" data-profile-name="' + escapeHtml(post.name) + '" data-profile-handle="' + escapeHtml(post.handle) + '"'
                 : '') +
             '>' + escapeHtml(post.name) + '</span>' +
+            stewardPillHtml(post) +
             '<span class="post-handle">@' + escapeHtml(post.handle) + '</span>' +
             '<span class="post-time">· ' + (post.hours != null ? post.hours + 'h' : 'now') + '</span>' +
           '</div>' +
@@ -1355,6 +2361,7 @@
             '<button class="post-action" data-act="share" type="button">Share</button>' +
             reportBtn + blockBtn +
             delBtn +
+            postOverflowHtml(post) +
           '</div>' +
         '</div>' +
       '</article>'
@@ -1374,30 +2381,377 @@
       .sort(function (a, b) { return (a.ms || 0) - (b.ms || 0); });
   }
 
+  // Grid taxonomy lives on site.taxonomy (same catalog as taxonomy.json).
+  // Left-nav nests come from site.nests plus this user's Firestore rooms.
+  // taxonomyNestsDraft is not a nav source. Topic nestSlug does not drive the watchlist click.
+  function taxonomyCatalog() {
+    var tax = site && site.taxonomy;
+    if (!tax || typeof tax !== 'object') {
+      return { version: 0, name: 'Topics', symbolPrefix: '$', topics: [], defaultWatchlist: [] };
+    }
+    return tax;
+  }
+  function activeTopics() {
+    var topics = taxonomyCatalog().topics;
+    if (!Array.isArray(topics)) return [];
+    return topics.filter(function (t) {
+      return t && t.status === 'active' && t.id;
+    });
+  }
+  function topicById(id) {
+    if (!id) return null;
+    var topics = activeTopics();
+    for (var i = 0; i < topics.length; i++) {
+      if (topics[i].id === id) return topics[i];
+    }
+    return null;
+  }
+  function defaultWatchlistIds() {
+    var tax = taxonomyCatalog();
+    var ids = Array.isArray(tax.defaultWatchlist) ? tax.defaultWatchlist.slice() : [];
+    if (!ids.length) {
+      activeTopics().forEach(function (t) {
+        if (t.followDefault) ids.push(t.id);
+      });
+    }
+    return sanitizeTopicIds(ids);
+  }
+  function sanitizeTopicIds(ids) {
+    var seen = {};
+    var out = [];
+    (ids || []).forEach(function (id) {
+      var topic = topicById(id);
+      if (!topic || seen[topic.id]) return;
+      seen[topic.id] = true;
+      out.push(topic.id);
+    });
+    return out;
+  }
+  function collectTopicIds(source) {
+    var out = [];
+    var seen = {};
+    function push(v) {
+      if (v == null) return;
+      var id = '';
+      if (typeof v === 'string') id = v.trim();
+      else if (typeof v === 'object' && v.id) id = String(v.id).trim();
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      out.push(id);
+    }
+    if (!source || typeof source !== 'object') return out;
+    if (Array.isArray(source.topicIds)) source.topicIds.forEach(push);
+    if (source.topicId) push(source.topicId);
+    if (Array.isArray(source.topics)) source.topics.forEach(push);
+    if (typeof source.topic === 'string') push(source.topic);
+    return out;
+  }
+  function postHasTopic(post, topicId) {
+    if (!post || !topicId) return false;
+    var ids = Array.isArray(post.topicIds) ? post.topicIds : collectTopicIds(post);
+    for (var i = 0; i < ids.length; i++) if (ids[i] === topicId) return true;
+    return false;
+  }
+  // v1 stores the personal list beside other user prefs (localStorage).
+  // TODO: move to Firestore users/{uid}/watchlist/{siteId} → { topicIds, updatedAt }
+  // once security rules allow that subcollection. Never write the factory taxonomy.
+  function watchlistStoreKey(uid) {
+    return 'subx.watchlist.' + (SITE_ID || 'site') + '.' + String(uid || 'anon');
+  }
+  function savePersonalWatchlist(topicIds) {
+    var uid = liveUid();
+    if (!uid) return;
+    saveJSON(watchlistStoreKey(uid), {
+      topicIds: topicIds.slice(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+  function personalWatchlistIds() {
+    var uid = liveUid();
+    if (!uid) return defaultWatchlistIds();
+    var raw = loadJSON(watchlistStoreKey(uid), null);
+    if (!raw || !Array.isArray(raw.topicIds)) {
+      var seeded = defaultWatchlistIds();
+      savePersonalWatchlist(seeded);
+      return seeded;
+    }
+    return sanitizeTopicIds(raw.topicIds);
+  }
+  function addToWatchlist(id) {
+    if (!isLiveUser() || !topicById(id)) return;
+    var ids = personalWatchlistIds();
+    if (ids.indexOf(id) !== -1) return;
+    ids.push(id);
+    savePersonalWatchlist(ids);
+    renderWatchlist();
+  }
+  function removeFromWatchlist(id) {
+    if (!isLiveUser()) return;
+    var ids = personalWatchlistIds().filter(function (x) { return x !== id; });
+    savePersonalWatchlist(ids);
+    renderWatchlist();
+  }
+  function watchRowHtml(topic) {
+    var focused = focusedTopicId === topic.id;
+    var nest = topic.nestSlug ? ' data-nest-slug="' + escapeHtml(topic.nestSlug) + '"' : '';
+    var remove = isLiveUser()
+      ? '<button type="button" class="watchlist-remove" data-watch-remove="' + escapeHtml(topic.id) +
+        '" aria-label="Unfollow ' + escapeHtml(topic.label) + '" title="Unfollow">&times;</button>'
+      : '';
+    return '<li class="watchlist-row' + (focused ? ' is-focused' : '') + '">' +
+      '<button type="button" class="watchlist-open" data-watch-topic="' + escapeHtml(topic.id) + '"' + nest +
+        ' aria-current="' + (focused ? 'true' : 'false') + '"' +
+        ' title="' + escapeHtml(topic.blurb || topic.label) + '">' +
+        '<span class="watchlist-symbol">' + escapeHtml(topic.symbol || topic.id) + '</span>' +
+        '<span class="watchlist-label">' + escapeHtml(topic.label) + '</span>' +
+      '</button>' + remove + '</li>';
+  }
+  function renderWatchlistCatalog() {
+    var box = document.getElementById('watchlist-catalog');
+    if (!box) return;
+    if (!isLiveUser() || !watchlistPickerOpen) {
+      box.innerHTML = '';
+      return;
+    }
+    var have = {};
+    personalWatchlistIds().forEach(function (id) { have[id] = true; });
+    var q = String(watchlistQuery || '').trim().toLowerCase().replace(/^\$/, '');
+    var rows = activeTopics().filter(function (t) {
+      if (have[t.id]) return false;
+      if (!q) return true;
+      var hay = ((t.symbol || '') + ' ' + t.label + ' ' + t.id + ' ' + (t.blurb || '') + ' ' + (t.kind || '')).toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+    if (!rows.length) {
+      box.innerHTML = '<li class="watchlist-catalog-empty">' +
+        (q ? 'No active topics match.' : 'Every active topic is already on your watchlist.') +
+        '</li>';
+      return;
+    }
+    box.innerHTML = rows.map(function (t) {
+      return '<li class="watchlist-catalog-row">' +
+        '<span class="watchlist-symbol">' + escapeHtml(t.symbol || '') + '</span>' +
+        '<span class="watchlist-catalog-copy"><span class="watchlist-label">' + escapeHtml(t.label) + '</span>' +
+        (t.blurb ? '<span class="watchlist-blurb">' + escapeHtml(t.blurb) + '</span>' : '') +
+        '</span>' +
+        '<button type="button" class="watchlist-follow" data-watch-add="' + escapeHtml(t.id) + '">Follow</button>' +
+      '</li>';
+    }).join('');
+  }
+  function renderWatchlist() {
+    var box = document.getElementById('watchlist');
+    if (!featureOn('watchlist')) { if (box) box.hidden = true; return; }
+    if (box) box.hidden = false;
+    var list = document.getElementById('watchlist-list');
+    if (!list) return;
+    var tax = taxonomyCatalog();
+    var kicker = document.getElementById('watchlist-kicker');
+    if (kicker) kicker.textContent = tax.name || 'Topics';
+    var signedIn = isLiveUser();
+    if (!signedIn) watchlistPickerOpen = false;
+    var ids = signedIn ? personalWatchlistIds() : defaultWatchlistIds();
+    var html = '';
+    ids.forEach(function (id) {
+      var topic = topicById(id);
+      if (topic) html += watchRowHtml(topic);
+    });
+    list.innerHTML = html;
+    var addBtn = document.getElementById('watchlist-add');
+    if (addBtn) {
+      addBtn.hidden = !signedIn;
+      addBtn.textContent = watchlistPickerOpen ? 'Close' : 'Add';
+      addBtn.setAttribute('aria-expanded', watchlistPickerOpen ? 'true' : 'false');
+    }
+    var note = document.getElementById('watchlist-note');
+    if (note) {
+      var taxName = tax.name || 'Topics';
+      if (!signedIn) {
+        note.hidden = false;
+        if (!activeTopics().length) {
+          note.textContent = (taxName || 'Topics') + ' topics are not loaded.';
+        } else {
+          note.innerHTML = '<button type="button" class="watchlist-signin" data-watch-signin>Sign in</button> to personalize. These are the ' + escapeHtml(taxName) + ' defaults.';
+        }
+      } else if (!ids.length) {
+        note.hidden = false;
+        note.textContent = 'Your watchlist is empty. Add a topic from the ' + taxName + ' catalog.';
+      } else {
+        note.hidden = true;
+        note.textContent = '';
+      }
+    }
+    var picker = document.getElementById('watchlist-picker');
+    if (picker) picker.hidden = !signedIn || !watchlistPickerOpen;
+    var search = document.getElementById('watchlist-search');
+    if (search) {
+      var taxLabel = tax.name || 'Topics';
+      search.placeholder = 'Search ' + taxLabel + ' topics';
+      search.setAttribute('aria-label', 'Search ' + taxLabel + ' topics to follow');
+      if (!search.dataset.wired) {
+        search.dataset.wired = '1';
+        search.addEventListener('input', function () {
+          watchlistQuery = search.value || '';
+          renderWatchlistCatalog();
+        });
+      }
+    }
+    renderWatchlistCatalog();
+  }
+  function topicFocusHtml(topic) {
+    var symbol = topic && topic.symbol ? topic.symbol : (focusedTopicId || 'Topic');
+    var label = topic ? topic.label : 'Not in this room';
+    var blurb = topic && topic.blurb
+      ? '<div class="topic-focus-blurb">' + escapeHtml(topic.blurb) + '</div>'
+      : '';
+    return '<div class="topic-focus">' +
+      '<div class="topic-focus-copy">' +
+        '<div class="topic-focus-title"><span class="topic-focus-symbol">' + escapeHtml(symbol) + '</span>' +
+        '<span class="topic-focus-label">' + escapeHtml(label) + '</span></div>' +
+        blurb +
+      '</div>' +
+      '<button type="button" class="topic-focus-clear" data-topic-clear>For You</button>' +
+    '</div>';
+  }
+  function renderTopicFeed() {
+    var el = document.getElementById('thoughts-feed');
+    if (!el) return;
+    var topic = topicById(focusedTopicId);
+    var symbol = topic && topic.symbol ? topic.symbol : focusedTopicId;
+    var head = topicFocusHtml(topic);
+    if (!topic) {
+      el.innerHTML = head + '<div class="post-empty"><strong>That topic is not in this room.</strong></div>';
+      refreshPorchUi();
+      return;
+    }
+    if (!liveReady && !liveError) {
+      el.innerHTML = head + '<div class="post-empty">Connecting to the live feed…</div>';
+      refreshPorchUi();
+      return;
+    }
+    if (liveError) {
+      el.innerHTML = head + '<div class="post-empty"><strong>Live feed could not load.</strong><p>No tagged posts to show.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    var seeds = (currentNest ? [] : sessionSeedPosts()).filter(function (p) { return postHasTopic(p, focusedTopicId); });
+    var posts = topLevelPosts().filter(function (p) { return postHasTopic(p, focusedTopicId); });
+    var seedIds = {};
+    for (var si = 0; si < seeds.length; si++) seedIds[seeds[si].id] = true;
+    posts = seeds.concat(posts.filter(function (p) { return !seedIds[p.id]; }));
+    if (!posts.length) {
+      el.innerHTML = head + '<div class="post-empty"><strong>No posts tagged ' + escapeHtml(symbol) + ' yet.</strong>' +
+        '<p>Nothing in the feed is tagged with this topic.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    el.innerHTML = head + posts.map(function (p) {
+      var kids = repliesFor(p.id);
+      return renderPost(p, false) + kids.map(function (r) { return renderPost(r, true); }).join('');
+    }).join('');
+    highlightDeepPost();
+    refreshPorchUi();
+  }
+
+  function canOpenProfile(post) {
+    return !!(post && post.authorUid && (dmsOn() || followingOn()));
+  }
+
+  function followingCount() {
+    var n = 0;
+    var k;
+    for (k in followingUids) if (followingUids[k]) n++;
+    return n;
+  }
+
+  function renderFollowingFeed() {
+    var el = document.getElementById('thoughts-feed');
+    if (!el) return;
+    if (!isLiveUser()) {
+      el.innerHTML = '<div class="post-empty"><strong>Sign in to follow people.</strong><p>Following is people in this room. The watchlist is topics.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    if (!followingReady && !followingError) {
+      el.innerHTML = '<div class="post-empty">Loading who you follow…</div>';
+      refreshPorchUi();
+      return;
+    }
+    if (followingError) {
+      el.innerHTML = '<div class="post-empty"><strong>Following could not load.</strong><p>' +
+        escapeHtml((followingError && followingError.message) || 'Could not read follows.') + '</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    if (!followingCount()) {
+      el.innerHTML = '<div class="post-empty"><strong>You are not following anyone yet.</strong><p>Open a profile and hit Follow. This is not the topic watchlist.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    if (!liveReady && !liveError) {
+      el.innerHTML = '<div class="post-empty">Connecting to the live feed…</div>';
+      refreshPorchUi();
+      return;
+    }
+    if (liveError) {
+      el.innerHTML = '<div class="post-empty"><strong>Live feed could not load.</strong><p>Follows are saved, but posts could not be listed.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    var posts = livePosts.filter(function (p) {
+      if (!p || p.parentId) return false;
+      if (p.authorUid && blockedUids[p.authorUid]) return false;
+      return !!(p.authorUid && followingUids[p.authorUid]);
+    });
+    if (!posts.length) {
+      el.innerHTML = '<div class="post-empty"><strong>No posts from people you follow.</strong><p>When they post in this room, it shows up here.</p></div>';
+      refreshPorchUi();
+      return;
+    }
+    el.innerHTML = posts.map(function (p) {
+      var kids = repliesFor(p.id);
+      return renderPost(p, false) + kids.map(function (r) { return renderPost(r, true); }).join('');
+    }).join('');
+    highlightDeepPost();
+    refreshPorchUi();
+  }
+
   function renderFeed() {
     const el = document.getElementById('thoughts-feed');
     if (!el) return;
 
-    if (currentTab === 'following') {
-      el.innerHTML = '<div class="post-empty soon-panel"><strong>Following — Soon.</strong> There is no follows graph in this preview. The live room is on For You.</div>';
-      refreshPorchUi();
+    if (focusedTopicId) {
+      renderTopicFeed();
       return;
     }
 
-    if (liveError) {
+    if (currentTab === 'following') {
+      if (!followingLive()) {
+        el.innerHTML = '<div class="post-empty soon-panel"><strong>Following — Soon.</strong> There is no follows graph in this preview. The live room is on For You.</div>';
+        refreshPorchUi();
+        return;
+      }
+      renderFollowingFeed();
+      return;
+    }
+
+    var seeds = currentNest ? [] : sessionSeedPosts();
+    if (liveError && !seeds.length) {
       el.innerHTML = '<div class="post-empty">Live feed could not load. The error is in the compose line above — this is not an empty room.</div>';
       refreshPorchUi();
       return;
     }
-    if (!liveReady) {
+    if (!liveReady && !seeds.length) {
       el.innerHTML = '<div class="post-empty">Connecting to the live feed…</div>';
       refreshPorchUi();
       return;
     }
 
-    let posts = topLevelPosts().slice();
-    if (currentTab === 'hot') posts.sort(function (a, b) { return (b.likes || 0) - (a.likes || 0); });
-    if (currentTab === 'new') posts.sort(function (a, b) { return (b.ms || 0) - (a.ms || 0); });
+    let posts = (liveReady && !liveError) ? topLevelPosts().slice() : [];
+    if (liveReady && !liveError && currentTab === 'hot') posts.sort(function (a, b) { return (b.likes || 0) - (a.likes || 0); });
+    if (liveReady && !liveError && currentTab === 'new') posts.sort(function (a, b) { return (b.ms || 0) - (a.ms || 0); });
+    var seedIds = {};
+    for (var si = 0; si < seeds.length; si++) seedIds[seeds[si].id] = true;
+    posts = seeds.concat(posts.filter(function (p) { return !seedIds[p.id]; }));
 
     if (!posts.length) {
       var empty = currentNest
@@ -1436,20 +2790,58 @@
   }
 
   function renderTrendCard(t) {
-    const href = t.url || '#explore';
+    const href = t.url || '#';
     const extra = t.url ? ' target="_blank" rel="noopener noreferrer"' : '';
-    return '<a class="news-item" href="' + escapeHtml(href) + '"' + extra + '>' +
-      '<div class="news-item-tag">' + escapeHtml(t.tag) + '</div>' +
-      '<div class="news-item-headline">' + escapeHtml(t.headline) + '</div>' +
-      '<div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div>' +
-      '<div class="news-item-meta">' + escapeHtml(t.meta) + '</div>' +
-    '</a>';
+    if (!featureOn('topicFollow')) {
+      return '<a class="news-item" href="' + escapeHtml(href) + '"' + extra + '>' +
+        '<div class="news-item-tag">' + escapeHtml(t.tag) + '</div>' +
+        '<div class="news-item-headline">' + escapeHtml(t.headline) + '</div>' +
+        '<div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div>' +
+        '<div class="news-item-meta">' + escapeHtml(t.meta) + '</div>' +
+      '</a>';
+    }
+    return '<article class="news-item">' +
+      renderFollowBtn(t) +
+      '<a class="news-item-main" href="' + escapeHtml(href) + '"' + extra + '>' +
+        '<div class="news-item-tag">' + escapeHtml(t.tag) + '</div>' +
+        '<div class="news-item-headline">' + escapeHtml(t.headline) + '</div>' +
+        '<div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div>' +
+        '<div class="news-item-meta">' + escapeHtml(t.meta) + '</div>' +
+      '</a>' +
+    '</article>';
+  }
+
+  function factCardHtml() {
+    var fact = railCfg().fact;
+    if (!fact) return '';
+    var tag = 'FACT';
+    var headline = '';
+    var body = '';
+    if (typeof fact === 'string') {
+      body = fact;
+    } else {
+      tag = fact.tag || 'FACT';
+      headline = fact.headline || '';
+      body = fact.body || fact.snippet || '';
+    }
+    if (!body && !headline) return '';
+    return '<div class="news-item news-item-fact">' +
+      '<div class="news-item-tag">' + escapeHtml(tag) + '</div>' +
+      (headline ? '<div class="news-item-headline">' + escapeHtml(headline) + '</div>' : '') +
+      (body ? '<div class="news-item-snippet">' + escapeHtml(body) + '</div>' : '') +
+      '<div class="news-item-meta">' + escapeHtml(railCfg().meta || 'Preview · noindex') + '</div>' +
+    '</div>';
   }
 
   function porchCardHtml() {
     var porch = railCfg().porch;
     if (!porch || !porch.options || !porch.options.length) return '';
     var prompt = porch.prompt || 'Your call?';
+    var porchCard = {
+      tag: 'Porch',
+      headline: prompt,
+      topic: porch.topic || porch.followId || 'porch'
+    };
     var last = lastPorchPick();
     var btns = porch.options.map(function (opt) {
       var picked = last && String(opt) === last ? ' porch-btn-picked' : '';
@@ -1457,6 +2849,7 @@
       return '<button type="button" class="porch-btn' + picked + '" data-porch="' + escapeHtml(opt) + '"' + aria + '>' + escapeHtml(opt) + '</button>';
     }).join('');
     return '<div class="news-item news-item-porch">' +
+      renderFollowBtn(porchCard) +
       '<div class="news-item-tag">Porch</div>' +
       '<div class="news-item-headline">' + escapeHtml(prompt) + '</div>' +
       '<div class="news-item-snippet">Pick a side. Posts to this room.</div>' +
@@ -1485,17 +2878,290 @@
       '.news-page-list .porch-btn-picked{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);background:rgba(192,54,44,0.08);}' +
       '.news-page-list .porch-tally{color:var(--text-muted,#4a5f66);}' +
       '[data-porch-dwell] .news-item-porch{padding-top:1.25rem;padding-bottom:1.25rem;}';
+    if (featureOn('topicFollow')) {
+      st.textContent +=
+        '.news-item{padding:1rem 2.8rem 1rem 1.4rem;position:relative;}' +
+        'a.news-item,.news-item-main{text-decoration:none;cursor:pointer;color:inherit;display:block;padding-right:2.15rem;}' +
+        '.news-follow-btn{position:absolute;top:0.75rem;right:0.85rem;z-index:2;width:28px;height:28px;padding:0;border-radius:999px;' +
+          'border:1px solid var(--accent,#e10600);background:transparent;color:var(--accent,#e10600);cursor:pointer;' +
+          'display:inline-flex;align-items:center;justify-content:center;}' +
+        '.news-follow-btn:hover{background:rgba(225,6,0,0.14);}' +
+        '.news-follow-btn:focus-visible{outline:2px solid var(--accent,#e10600);outline-offset:2px;}' +
+        '.news-follow-btn.is-following{background:var(--accent,#e10600);color:#fff;border-color:var(--accent,#e10600);}' +
+        '.news-page-list .news-follow-btn{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);}' +
+        '.news-page-list .news-follow-btn.is-following{background:var(--accent,#c0362c);color:#fff;border-color:var(--accent,#c0362c);}';
+    }
     document.head.appendChild(st);
   }
 
   function paintRail(items) {
     ensureRailCss();
-    var porch = currentNest ? '' : porchCardHtml();
-    var html = (items || []).map(renderTrendCard).join('') + porch;
+    var html = factCardHtml() + (items || []).map(renderTrendCard).join('') + (currentNest ? '' : porchCardHtml());
     var rail = document.getElementById('news-feed');
     var page = document.getElementById('news-page-list');
     if (rail) rail.innerHTML = html;
     if (page) page.innerHTML = html;
+    maybeShowRailOverlay();
+  }
+
+  var railOverlayUiReady = false;
+  var railOverlayTimer = null;
+  var railOverlayDeadline = 0;
+  var railOverlayRemaining = 0;
+  var railOverlayPrevFocus = null;
+  var railOverlayOnKey = null;
+  var railOverlayOnClick = null;
+  var railOverlayWired = false;
+
+  function overlayCfg() {
+    var ov = railCfg().overlay;
+    return (ov && typeof ov === 'object') ? ov : null;
+  }
+
+  function overlayEnabled() {
+    var ov = overlayCfg();
+    return !!(ov && ov.enabled);
+  }
+
+  function overlayMs() {
+    var n = overlayCfg() && parseInt(overlayCfg().ms, 10);
+    return (n > 0) ? n : 7000;
+  }
+
+  function overlayStorageKey() {
+    return 'subx.railOverlay.' + (SITE_ID || '');
+  }
+
+  function overlaySeen() {
+    try { return sessionStorage.getItem(overlayStorageKey()) === '1'; } catch (e) { return false; }
+  }
+
+  function markOverlaySeen() {
+    try { sessionStorage.setItem(overlayStorageKey(), '1'); } catch (e) { /* private mode */ }
+  }
+
+  function railOfficialUrls() {
+    var cfg = railCfg();
+    var set = {};
+    function add(u) {
+      var s = String(u || '').trim();
+      if (/^https:\/\//i.test(s)) set[s] = true;
+    }
+    add(cfg.forecastPage);
+    add(cfg.forecastUrl);
+    add(cfg.alertsUrl);
+    var outbound = cfg.outbound || [];
+    for (var i = 0; i < outbound.length; i++) add(outbound[i] && outbound[i].url);
+    return set;
+  }
+
+  function overlayLinks() {
+    var ov = overlayCfg();
+    var configured = (ov && ov.links) || [];
+    var allow = railOfficialUrls();
+    var out = [];
+    for (var i = 0; i < configured.length && out.length < 2; i++) {
+      var link = configured[i];
+      if (!link || !link.url || !link.label) continue;
+      var url = String(link.url).trim();
+      if (!allow[url]) continue;
+      out.push({ label: String(link.label), url: url });
+    }
+    if (!out.length && railCfg().forecastPage && allow[railCfg().forecastPage]) {
+      out.push({ label: 'Official forecast', url: railCfg().forecastPage });
+    }
+    return out;
+  }
+
+  function overlayHeadline() {
+    var ov = overlayCfg();
+    if (ov && ov.headline) return String(ov.headline);
+    var cfg = railCfg();
+    if (cfg.meta) return String(cfg.meta);
+    if (cfg.kicker) return String(cfg.kicker);
+    var first = document.querySelector('#news-feed .news-item-headline');
+    if (first && first.textContent) return first.textContent.trim();
+    return cfg.title || 'Room Brief';
+  }
+
+  function railPanelIsVisible() {
+    var panel = document.getElementById('right-panel');
+    if (!panel) return false;
+    if (document.body.classList.contains('right-collapsed')) return false;
+    var cs = window.getComputedStyle(panel);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    var rect = panel.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.right > 8;
+  }
+
+  function overlayFadeMs() {
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 0;
+    } catch (e) { /* ignore */ }
+    return 200;
+  }
+
+  function sendPixel(eventName) {
+    if (site && site.pixel === false) return; // opt-out per room (privacy v1.1 gate); default on as in T0
+    try {
+      var k = 'subx.vid';
+      var v = localStorage.getItem(k);
+      if (!v) {
+        v = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        localStorage.setItem(k, v);
+      }
+      var url = 'https://us-central1-subx-skins.cloudfunctions.net/pixel?s=' +
+        encodeURIComponent(SITE_ID) + '&v=' + encodeURIComponent(v);
+      if (eventName) url += '&e=' + encodeURIComponent(eventName);
+      if (navigator.sendBeacon) navigator.sendBeacon(url);
+    } catch (e) { /* best-effort */ }
+  }
+
+  function clearOverlayTimer() {
+    if (railOverlayTimer) {
+      clearTimeout(railOverlayTimer);
+      railOverlayTimer = null;
+    }
+  }
+
+  function pauseOverlayTimer() {
+    if (!railOverlayTimer) return;
+    railOverlayRemaining = Math.max(0, railOverlayDeadline - Date.now());
+    clearOverlayTimer();
+  }
+
+  function resumeOverlayTimer() {
+    if (railOverlayTimer || !document.getElementById('rail-overlay')) return;
+    if (railOverlayRemaining <= 0) {
+      dismissRailOverlay('autodismiss');
+      return;
+    }
+    railOverlayDeadline = Date.now() + railOverlayRemaining;
+    railOverlayTimer = setTimeout(function () {
+      railOverlayTimer = null;
+      dismissRailOverlay('autodismiss');
+    }, railOverlayRemaining);
+  }
+
+  function detachOverlayListeners() {
+    if (railOverlayOnKey) {
+      document.removeEventListener('keydown', railOverlayOnKey, true);
+      railOverlayOnKey = null;
+    }
+    if (railOverlayOnClick) {
+      document.removeEventListener('click', railOverlayOnClick, true);
+      railOverlayOnClick = null;
+    }
+  }
+
+  function restoreOverlayFocus() {
+    var prev = railOverlayPrevFocus;
+    railOverlayPrevFocus = null;
+    if (!prev || typeof prev.focus !== 'function') return;
+    try { prev.focus(); } catch (e) { /* ignore */ }
+  }
+
+  function dismissRailOverlay(reason) {
+    var el = document.getElementById('rail-overlay');
+    if (!el || el.getAttribute('data-closing') === '1') return;
+    el.setAttribute('data-closing', '1');
+    clearOverlayTimer();
+    detachOverlayListeners();
+    if (reason === 'autodismiss') sendPixel('overlay_autodismiss');
+    el.classList.remove('is-in');
+    var ms = overlayFadeMs();
+    function done() {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      var panel = document.getElementById('right-panel');
+      if (panel) panel.classList.remove('is-overlaying');
+      restoreOverlayFocus();
+    }
+    if (!ms) done();
+    else setTimeout(done, ms);
+  }
+
+  function showRailOverlay() {
+    if (document.getElementById('rail-overlay')) return;
+    var panel = document.getElementById('right-panel');
+    if (!panel) return;
+    var links = overlayLinks();
+    var headline = overlayHeadline();
+    var kicker = railCfg().title || 'Room Brief';
+    var el = document.createElement('div');
+    el.id = 'rail-overlay';
+    el.className = 'rail-overlay';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-labelledby', 'rail-overlay-headline');
+    el.setAttribute('tabindex', '-1');
+    var linkHtml = links.map(function (link) {
+      return '<a class="rail-overlay-cta" href="' + escapeHtml(link.url) +
+        '" target="_blank" rel="noopener noreferrer">' + escapeHtml(link.label) + '</a>';
+    }).join('');
+    el.innerHTML = '<div class="rail-overlay-card">' +
+      '<div class="rail-overlay-kicker">' + escapeHtml(kicker) + '</div>' +
+      '<p class="rail-overlay-headline" id="rail-overlay-headline">' + escapeHtml(headline) + '</p>' +
+      (linkHtml ? '<div class="rail-overlay-links">' + linkHtml + '</div>' : '') +
+      '</div>';
+    panel.appendChild(el);
+    panel.classList.add('is-overlaying');
+    markOverlaySeen();
+    sendPixel('overlay_shown');
+    railOverlayPrevFocus = document.activeElement;
+    railOverlayRemaining = overlayMs();
+    resumeOverlayTimer();
+    el.addEventListener('pointerenter', pauseOverlayTimer);
+    el.addEventListener('pointerleave', resumeOverlayTimer);
+    el.addEventListener('click', function (e) {
+      var a = e.target.closest ? e.target.closest('a.rail-overlay-cta') : null;
+      if (!a) return;
+      sendPixel('overlay_click');
+      dismissRailOverlay('click');
+    });
+    railOverlayOnKey = function (e) {
+      if (e.key !== 'Escape') return;
+      if (!document.getElementById('rail-overlay')) return;
+      e.preventDefault();
+      dismissRailOverlay('escape');
+    };
+    railOverlayOnClick = function (e) {
+      var card = el.querySelector('.rail-overlay-card');
+      if (card && card.contains(e.target)) return;
+      dismissRailOverlay('outside');
+    };
+    document.addEventListener('keydown', railOverlayOnKey, true);
+    setTimeout(function () {
+      if (!document.getElementById('rail-overlay')) return;
+      document.addEventListener('click', railOverlayOnClick, true);
+    }, 0);
+    requestAnimationFrame(function () {
+      el.classList.add('is-in');
+      try { el.focus(); } catch (e) { /* ignore */ }
+      try { if (el.matches(':hover')) pauseOverlayTimer(); } catch (e2) { /* ignore */ }
+    });
+  }
+
+  function maybeShowRailOverlay() {
+    if (!railOverlayUiReady) return;
+    if (!overlayEnabled()) return;
+    if (overlaySeen()) return;
+    if (document.getElementById('rail-overlay')) return;
+    if (!railPanelIsVisible()) return;
+    showRailOverlay();
+  }
+
+  function syncRailOverlayViewport() {
+    if (!overlayEnabled()) return;
+    if (!railPanelIsVisible()) {
+      dismissRailOverlay('hidden');
+      return;
+    }
+    maybeShowRailOverlay();
+  }
+
+  function wireRailOverlay() {
+    if (railOverlayWired) return;
+    railOverlayWired = true;
+    window.addEventListener('resize', syncRailOverlayViewport);
   }
 
   function nwsCardFromPeriod(period, href, meta) {
@@ -1706,7 +3372,9 @@
         headline: t.headline,
         snippet: t.snippet || '',
         meta: t.meta || (railCfg().meta || 'This room'),
-        url: t.url || ''
+        url: t.url || '',
+        topic: t.topic || '',
+        followId: t.followId || ''
       });
     }
     return out;
@@ -1842,7 +3510,8 @@
       headline: cmo.title || race.raceName || 'Grand Prix',
       snippet: circuitLine || 'Race weekend',
       meta: raceWhen ? ('Race · ' + f1FormatLocal(raceWhen)) : meta,
-      url: href
+      url: href,
+      topic: race.round ? ('r' + race.round) : 'gp'
     });
     if (sessions.length) {
       cards.push({
@@ -1850,7 +3519,8 @@
         headline: 'Weekend timetable',
         snippet: sessions.map(function (s) { return s.label + ' ' + f1FormatLocal(s.when); }).join(' · '),
         meta: meta,
-        url: href
+        url: href,
+        topic: 'sessions'
       });
     }
     var nextSess = null;
@@ -1876,7 +3546,8 @@
       headline: stateHead,
       snippet: stateSnip,
       meta: meta,
-      url: href
+      url: href,
+      topic: justFinished ? 'finished' : (live ? 'live' : 'next')
     });
     return cards;
   }
@@ -1962,6 +3633,14 @@
 
   function f1FormatGap(gap) {
     if (gap == null || gap === '') return '';
+    if (Object.prototype.toString.call(gap) === '[object Array]') {
+      var lastGap = null;
+      var gi;
+      for (gi = gap.length - 1; gi >= 0; gi--) {
+        if (gap[gi] != null && gap[gi] !== '') { lastGap = gap[gi]; break; }
+      }
+      return f1FormatGap(lastGap);
+    }
     if (typeof gap === 'string') {
       var g = gap.replace(/^\s+|\s+$/g, '');
       if (!g || /^0+(\.0+)?$/.test(g)) return '';
@@ -2020,11 +3699,67 @@
     return parts.join(' · ');
   }
 
+  function f1SessionRank(item) {
+    var tag = (item && item.tag) || '';
+    if (tag === 'Race') return 80;
+    if (tag === 'Quali') return 70;
+    if (tag === 'Sprint') return 60;
+    if (tag === 'Sprint Quali') return 50;
+    if (tag === 'FP3') return 30;
+    if (tag === 'FP2') return 20;
+    if (tag === 'FP1') return 10;
+    return 0;
+  }
+
+  function f1SessionUsable(item, now) {
+    if (!item) return false;
+    if (item.endMs < now) return true;
+    if (item.startMs <= now) return true;
+    return false;
+  }
+
+  function f1PickResultSession(list, now, preferKey) {
+    var latestCompleted = null;
+    var quali = null;
+    var race = null;
+    var pinned = null;
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var item = list[i];
+      var key = item.raw && item.raw.session_key;
+      if (preferKey != null && String(key) === String(preferKey)) pinned = item;
+      if (item.tag === 'Quali') quali = item;
+      if (item.tag === 'Race') race = item;
+      if (item.endMs < now) latestCompleted = item;
+    }
+    var pick = latestCompleted;
+    if (quali && f1SessionUsable(quali, now)) pick = quali;
+    if (race && f1SessionUsable(race, now)) pick = race;
+    if (pinned && f1SessionUsable(pinned, now)) {
+      if (!pick || f1SessionRank(pinned) >= f1SessionRank(pick)) pick = pinned;
+    }
+    if (latestCompleted && (!pick || f1SessionRank(latestCompleted) > f1SessionRank(pick))) {
+      pick = latestCompleted;
+    }
+    return pick;
+  }
+
   function overlayOpenF1Cards(cards, cfg) {
     if (!cards || !cards.length) return Promise.resolve(cards);
-    return fetchOpenF1Json('/sessions?session_key=latest').then(function (latest) {
-      var meetingKey = latest && latest[0] && latest[0].meeting_key;
+    var pinnedKey = cfg && cfg.openf1SessionKey;
+    var latestP = fetchOpenF1Json('/sessions?session_key=latest');
+    var pinnedP = pinnedKey != null
+      ? fetchOpenF1Json('/sessions?session_key=' + encodeURIComponent(pinnedKey))
+      : Promise.resolve(null);
+    return Promise.all([latestP, pinnedP]).then(function (pair) {
+      var latestSess = pair[0] && pair[0][0];
+      var pinnedSess = pair[1] && pair[1][0];
+      var meetingKey = latestSess && latestSess.meeting_key;
+      if (meetingKey == null && pinnedSess) meetingKey = pinnedSess.meeting_key;
       if (meetingKey == null) return cards;
+      var preferKey = null;
+      if (pinnedSess && pinnedSess.meeting_key == meetingKey) preferKey = pinnedSess.session_key;
+      else if (pinnedKey != null && latestSess && latestSess.meeting_key == meetingKey) preferKey = pinnedKey;
       return fetchOpenF1Json('/sessions?meeting_key=' + encodeURIComponent(meetingKey)).then(function (sessions) {
         if (!sessions || !sessions.length) return cards;
         var now = Date.now();
@@ -2045,14 +3780,17 @@
           });
         }
         list.sort(function (a, b) { return a.startMs - b.startMs; });
-        var completed = null;
+        var completed = f1PickResultSession(list, now, preferKey);
         var live = null;
         var upcoming = null;
         for (i = 0; i < list.length; i++) {
           var item = list[i];
-          if (item.endMs < now) completed = item;
-          else if (item.startMs <= now && item.endMs > now) live = item;
+          if (item.startMs <= now && item.endMs > now) live = item;
           else if (item.startMs > now && !upcoming) upcoming = item;
+        }
+        if (completed && live && completed.raw && live.raw &&
+            String(completed.raw.session_key) === String(live.raw.session_key)) {
+          live = null;
         }
         var resultKey = completed && completed.raw.session_key;
         var resultP = resultKey != null
@@ -2073,9 +3811,11 @@
                 out[1] = {
                   tag: completed.tag,
                   headline: line,
-                  snippet: completed.tag + ' result · OpenF1 historical',
+                  snippet: completed.tag + ' result · OpenF1 historical' +
+                    (resultKey != null ? ' ' + resultKey : ''),
                   meta: meta,
-                  url: href
+                  url: href,
+                  topic: topicFollowSlug(completed.tag) || 'result'
                 };
               }
             }
@@ -2086,15 +3826,17 @@
                 headline: live.tag + ' is on',
                 snippet: live.tag + ' is on · ' + f1FormatLocal(live.start),
                 meta: meta,
-                url: href
+                url: href,
+                topic: 'live'
               };
             } else if (upcoming) {
               stateCard = {
                 tag: 'Next',
                 headline: cmo.state || 'Next up',
-                snippet: upcoming.tag + ' · ' + f1FormatLocal(upcoming.start),
+                snippet: cmo.next || (upcoming.tag + ' · ' + f1FormatLocal(upcoming.start)),
                 meta: meta,
-                url: href
+                url: href,
+                topic: 'next'
               };
             } else {
               var finished = !!(completed && !live && !upcoming);
@@ -2106,7 +3848,8 @@
                 headline: finished ? 'Just finished' : (cmo.state || (out[2] && out[2].headline) || 'Next up'),
                 snippet: snip,
                 meta: meta,
-                url: href
+                url: href,
+                topic: finished ? 'finished' : 'next'
               };
             }
             if (out.length >= 3) out[2] = stateCard;
@@ -2147,7 +3890,7 @@
 
   function fallbackTrendCards() {
     var extra = outboundCards();
-    if (extra.length) return extra.slice(0, 1);
+    if (extra.length) return extra.slice(0, railKind() === 'f1-calendar' ? railNwsSlots() : 1);
     if (railKind() === 'f1-calendar') return (TRENDS || []).slice(0, railNwsSlots());
     if (railKind() || railCfg().porch) return [];
     return (TRENDS || []).slice(0, 1);
@@ -2158,11 +3901,49 @@
     var porchOn = !!(porch && porch.options && porch.options.length);
     var max = parseInt(railCfg().maxCards, 10) || RAIL_MAX;
     if (max < 1) max = RAIL_MAX;
-    if (railKind() === 'f1-calendar') {
-      var pins = outboundCards().length;
-      return 3 + pins;
-    }
+    if (railKind() === 'f1-calendar') return Math.min(3, max);
     return porchOn ? Math.max(1, max - 1) : max;
+  }
+
+  function stalePreRaceCard(card) {
+    if (!card) return false;
+    var tag = String(card.tag || '');
+    var head = String(card.headline || '');
+    var snip = String(card.snippet || '');
+    var blob = head + ' ' + snip;
+    if (/^FP2$/i.test(tag)) return true;
+    if (/1:33\.662/.test(head) || /Antonelli tops FP2/i.test(head)) return true;
+    if (/1:22\.559/.test(head) && /Lec|Ant/i.test(head)) return true;
+    if (/Russell/i.test(head) && /1:22/.test(head) && !/pole|P2/i.test(head)) return true;
+    if (/FP2/i.test(snip) && /Russell/i.test(head + snip) && !/pole/i.test(head)) return true;
+    if (/^Grid$/i.test(tag) && /PU|Monza|Gasly/i.test(blob)) return true;
+    if (/^Quali$/i.test(tag) && /Monza|Gasly|yellow-flag lottery/i.test(blob)) return true;
+    if (/Gasly P1/i.test(head) || /Gasly pole/i.test(head)) return true;
+    if (/Race Sun 7:00/i.test(blob) && !/57 laps/i.test(blob)) return true;
+    if (/back(\s+of\s+the)?\s+(the\s+)?grid|back row|→ back/i.test(blob) && /PU/i.test(blob)) return true;
+    if (/OpenF1 11357|session_key 11357/i.test(blob)) return true;
+    return false;
+  }
+
+  function mergeF1Rail(cards, extra) {
+    var max = railNwsSlots();
+    var pins = [];
+    var i;
+    extra = extra || [];
+    for (i = 0; i < extra.length; i++) {
+      if (!stalePreRaceCard(extra[i])) pins.push(extra[i]);
+    }
+    if (pins.length >= max) return pins.slice(0, max);
+    var live = [];
+    if (cards && cards.length) {
+      if (cards[1] && !stalePreRaceCard(cards[1])) live.push(cards[1]);
+      if (cards[2] && !stalePreRaceCard(cards[2])) live.push(cards[2]);
+      if (cards[0] && pins.length === 0) live.push(cards[0]);
+    }
+    var out = pins.slice();
+    for (i = 0; i < live.length && out.length < max; i++) out.push(live[i]);
+    if (!out.length) return (cards || []).slice(0, max);
+    return out.slice(0, max);
   }
 
   var f1RefreshTimer = null;
@@ -2341,7 +4122,23 @@
     }
     liveFetch().then(function (cards) {
       var extra = outboundCards();
-      var merged = (cards || []).concat(extra);
+      var merged;
+      if (railKind() === 'f1-calendar') {
+        merged = mergeF1Rail(cards, extra);                                   // gpchat (F1 rail)
+      } else if (railCfg().liveKeep === true) {
+        // samochat: forecast/outbound first, keep at least one live card (was samochat-only code)
+        var slots = railNwsSlots();
+        var liveKeep = Math.max(0, slots - extra.length);
+        if (!liveKeep && (cards || []).length) liveKeep = 1;
+        merged = railKind() === 'nws-forecast'
+          ? (extra || []).concat((cards || []).slice(0, liveKeep))
+          : (cards || []).slice(0, liveKeep).concat(extra);
+        if (merged.length) { commitRail(merged); return; }
+      } else if (railKind() === 'nws-forecast' || railKind() === 'bart-bsa') {
+        merged = (extra || []).concat(cards || []);                           // 415/808 (nws-forecast), bartchat (bart-bsa): pinned first
+      } else {
+        merged = (cards || []).concat(extra);
+      }
       if (merged.length) commitRail(merged.slice(0, railNwsSlots()));
       else commitRail(fallbackTrendCards());
     }).catch(function (err) {
@@ -2464,14 +4261,14 @@
 
   function addRoomTextPost(text) {
     var live = fbAuth && fbAuth.currentUser;
-    var disp = (currentUser && currentUser.name) || live.displayName || (live.email || 'member').split('@')[0] || 'Member';
-    var handle = (currentUser && currentUser.handle) || String(disp).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
-    return fbDb.collection('posts').add({
+    if (!live) return Promise.reject(new Error('Sign in to post. Guest can only browse.'));
+    var who = authorForWrite(live);
+    return guardedPostWrite({
       siteId: SITE_ID,
       parentId: null,
       authorUid: live.uid,
-      authorName: disp,
-      authorHandle: handle,
+      authorName: who.name,
+      authorHandle: who.handle,
       text: String(text || '').slice(0, 280),
       likes: {},
       likeCount: 0,
@@ -2501,7 +4298,19 @@
       composeErr('Posted.');
       refreshPorchUi();
     }).catch(function (e) {
-      composeErr((e && e.message) ? e.message : 'Could not post.');
+      composeErr(guardPublicErr(e, 'Could not post.'));
+    });
+  }
+
+  function nestSeatCards() {
+    var nests = (site && site.nests) || [];
+    return nests.map(function (n) {
+      return {
+        tag: (n.kind === 'species' ? 'Species' : (n.kind || skin('seatTag', 'Nest'))),
+        title: n.label || n.slug || skin('seatTag', 'Nest'),
+        snippet: n.blurb || n.body || '',
+        url: ''
+      };
     });
   }
 
@@ -2517,29 +4326,310 @@
         return '<article class="explore-card">' + inner + '</article>';
       }).join('');
     }
+    var explainer = document.getElementById('explore-explainer');
+    if (explainer) {
+      var copy = (site && site.exploreExplainer) || '';
+      explainer.textContent = copy;
+      explainer.hidden = !copy;
+    }
+    var seats = nestSeatCards();
+    var placeCards = seats.length ? seats : PLACES;
     var places = document.getElementById('explore-pane-places');
     var topics = document.getElementById('explore-pane-topics');
-    if (places) places.innerHTML = cards(PLACES);
+    if (places) places.innerHTML = cards(placeCards);
     if (topics) topics.innerHTML = cards(TOPICS);
   }
 
-  function renderNotifs() {
-    const el = document.getElementById('notif-list');
-    if (!el) return;
-    el.innerHTML = '<div class="soon-panel">' +
-      '<strong>Notifications — Soon.</strong>' +
-      '<p>No live alerts in this preview. Dummy copy stays in site.json as sample only and is not shown as real activity.</p>' +
-      '</div>';
-    const badge = document.getElementById('notif-badge');
-    if (badge) {
+  function nameForUid(uid) {
+    if (!uid) return 'Someone';
+    if (uid === liveUid() && currentUser && currentUser.name) return currentUser.name;
+    var i;
+    for (i = 0; i < livePosts.length; i++) {
+      if (livePosts[i].authorUid === uid && livePosts[i].name) return livePosts[i].name;
+    }
+    return 'Someone';
+  }
+
+  function notifWhen(ms) {
+    if (!ms) return '';
+    var delta = Date.now() - ms;
+    if (delta < 60000) return 'now';
+    if (delta < 3600000) return Math.floor(delta / 60000) + 'm';
+    if (delta < 86400000) return Math.floor(delta / 3600000) + 'h';
+    return Math.floor(delta / 86400000) + 'd';
+  }
+
+  function notifLine(n) {
+    var who = nameForUid(n.fromUid);
+    if (n.type === 'report') {
+      var room = (site && site.name) || SITE_ID || 'room';
+      var snip = String(n.text || '').replace(/^Report:\s*/, '');
+      return 'Report on ' + room + ': ' + snip;
+    }
+    if (n.type === 'reply') return who + ' replied to your post' + (n.text ? (': ' + n.text) : '');
+    if (n.type === 'like') return who + ' liked your post';
+    if (n.type === 'follow') return who + ' followed you';
+    if (n.text) return n.text;
+    return who + ' · ' + (n.type || 'notification');
+  }
+
+  function siteNotifs() {
+    return notifItems.filter(function (n) { return !n.siteId || n.siteId === SITE_ID; });
+  }
+
+  function unreadNotifCount() {
+    var n = 0;
+    var list = siteNotifs();
+    var i;
+    for (i = 0; i < list.length; i++) if (!list[i].read) n++;
+    return n;
+  }
+
+  function syncNotifChrome() {
+    var btn = document.getElementById('notif-mark-read');
+    var badge = document.getElementById('notif-badge');
+    var unread = notifsLive() ? unreadNotifCount() : 0;
+    if (btn) {
+      if (!notifsLive()) {
+        btn.disabled = true;
+        btn.textContent = 'Soon';
+      } else {
+        btn.textContent = 'Mark read';
+        btn.disabled = !unread;
+      }
+    }
+    if (!badge) return;
+    if (unread) {
+      badge.textContent = unread > 9 ? '9+' : String(unread);
+      badge.classList.add('visible');
+      badge.hidden = false;
+    } else {
       badge.textContent = '';
       badge.classList.remove('visible');
       badge.hidden = true;
     }
   }
 
+  function renderNotifs() {
+    var el = document.getElementById('notif-list');
+    syncNotifChrome();
+    if (!el) return;
+    if (!notifsLive()) {
+      el.innerHTML = '<div class="soon-panel">' +
+        '<strong>Notifications — Soon.</strong>' +
+        '<p>No live alerts in this preview. Dummy copy stays in site.json as sample only and is not shown as real activity.</p>' +
+        '</div>';
+      return;
+    }
+    var list = siteNotifs();
+    if (notifTab === 'mentions') list = list.filter(function (n) { return n.type === 'mention'; });
+    if (!list.length) {
+      el.innerHTML = '<div class="soon-panel"><strong>' +
+        (notifTab === 'mentions' ? 'No mentions.' : 'No notifications yet.') +
+        '</strong><p>When someone replies to your post, it shows up here.</p></div>';
+      return;
+    }
+    el.innerHTML = list.map(function (n) {
+      return '<button type="button" class="notif-item' + (n.read ? '' : ' unread') + '" data-notif-id="' + escapeHtml(n.id) + '" data-notif-type="' + escapeHtml(n.type || '') + '"' +
+        (n.postId ? ' data-post-id="' + escapeHtml(n.postId) + '"' : '') + '>' +
+        '<p>' + escapeHtml(notifLine(n)) + '</p>' +
+        '<time>' + escapeHtml(notifWhen(n.ms)) + '</time></button>';
+    }).join('');
+  }
+
+  function mapNotif(doc) {
+    var d = doc.data() || {};
+    var ms = d.createdAt && d.createdAt.toMillis ? d.createdAt.toMillis() : 0;
+    return {
+      id: doc.id,
+      toUid: d.toUid || '',
+      fromUid: d.fromUid || '',
+      type: d.type || '',
+      siteId: d.siteId || '',
+      postId: d.postId || '',
+      text: d.text || '',
+      read: d.read === true,
+      ms: ms
+    };
+  }
+
+  function teardownPeopleSocial() {
+    if (followingUnsub) { followingUnsub(); followingUnsub = null; }
+    followingUids = {};
+    followingReady = false;
+    followingError = null;
+    followWriteInFlight = false;
+    if (notifsUnsub) { notifsUnsub(); notifsUnsub = null; }
+    notifItems = [];
+    notifsReady = false;
+    notifsError = null;
+  }
+
+  function listenFollowing(uid) {
+    if (followingUnsub) { followingUnsub(); followingUnsub = null; }
+    followingUids = {};
+    followingReady = false;
+    followingError = null;
+    if (!followingOn() || !uid) {
+      syncFollowButton();
+      if (currentTab === 'following') renderFeed();
+      return;
+    }
+    followingUnsub = fbDb.collection('users').doc(uid).collection('following')
+      .where('siteId', '==', SITE_ID)
+      .onSnapshot(function (snap) {
+        followingReady = true;
+        followingError = null;
+        followingUids = {};
+        snap.forEach(function (doc) {
+          var d = doc.data() || {};
+          if (d.siteId && d.siteId !== SITE_ID) return;
+          var id = d.targetUid || doc.id;
+          if (id && id !== uid) followingUids[id] = true;
+        });
+        syncFollowButton();
+        hideDummyChrome();
+        if (currentTab === 'following') renderFeed();
+      }, function (err) {
+        followingReady = true;
+        followingError = err || new Error('Could not read follows.');
+        followingUids = {};
+        console.warn('following', err);
+        syncFollowButton();
+        hideDummyChrome();
+        if (currentTab === 'following') renderFeed();
+      });
+  }
+
+  function listenNotifs(uid) {
+    if (notifsUnsub) { notifsUnsub(); notifsUnsub = null; }
+    notifItems = [];
+    notifsReady = false;
+    notifsError = null;
+    if (!notifsOn() || !uid) {
+      renderNotifs();
+      return;
+    }
+    notifsUnsub = fbDb.collection('users').doc(uid).collection('notifications')
+      .orderBy('createdAt', 'desc')
+      .onSnapshot(function (snap) {
+        notifsReady = true;
+        notifsError = null;
+        notifItems = snap.docs.map(mapNotif);
+        hideDummyChrome();
+      }, function (err) {
+        notifsReady = true;
+        notifsError = err || new Error('Could not read notifications.');
+        notifItems = [];
+        console.warn('notifications', err);
+        hideDummyChrome();
+      });
+  }
+
+  function togglePersonFollow() {
+    if (!followingOn()) return;
+    var target = viewingProfile && viewingProfile.uid;
+    if (!target) return;
+    if (!isLiveUser()) { openAuth('join'); return; }
+    if (!requireVerified('follow')) return;
+    var me = liveUid();
+    if (!me || target === me || !fbDb || followWriteInFlight) return;
+    var ref = fbDb.collection('users').doc(me).collection('following').doc(target);
+    var on = !!followingUids[target];
+    followWriteInFlight = true;
+    syncFollowButton();
+    var done = function () {
+      followWriteInFlight = false;
+      syncFollowButton();
+    };
+    var op = on
+      ? ref.delete()
+      : ref.set({
+        targetUid: target,
+        siteId: SITE_ID,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    op.then(done).catch(function (e) {
+      composeErr((e && e.message) ? e.message : 'Could not update follow.');
+      done();
+    });
+  }
+
+  function syncFollowButton() {
+    var btn = document.getElementById('profile-follow-btn');
+    if (!btn) return;
+    var uid = viewingProfile && viewingProfile.uid;
+    var other = !!(uid && uid !== liveUid());
+    var show = other && followingLive();
+    btn.hidden = !show;
+    if (!show) {
+      btn.disabled = false;
+      btn.textContent = 'Follow';
+      btn.classList.remove('is-following');
+      btn.setAttribute('aria-pressed', 'false');
+      return;
+    }
+    if (!isLiveUser()) {
+      btn.disabled = false;
+      btn.textContent = 'Follow';
+      btn.classList.remove('is-following');
+      btn.setAttribute('aria-pressed', 'false');
+      return;
+    }
+    var on = !!followingUids[uid];
+    btn.textContent = on ? 'Following' : 'Follow';
+    btn.classList.toggle('is-following', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.disabled = !!followWriteInFlight;
+  }
+
+  function writeReplyNotif(parentId, text) {
+    var me = liveUid();
+    if (!me || !fbDb || !notifsOn() || notifsError || !isEmailVerified() || !parentId) return;
+    var send = function (authorUid) {
+      if (!authorUid || authorUid === me) return;
+      var payload = {
+        toUid: authorUid,
+        fromUid: me,
+        type: 'reply',
+        siteId: SITE_ID,
+        postId: parentId,
+        read: false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      };
+      var snippet = String(text || '').trim().slice(0, 180);
+      if (snippet) payload.text = snippet;
+      fbDb.collection('users').doc(authorUid).collection('notifications').add(payload).catch(function (e) {
+        console.warn('reply notif', e);
+      });
+    };
+    var parent = findPost(parentId);
+    if (parent && parent.authorUid) { send(parent.authorUid); return; }
+    fbDb.collection('posts').doc(parentId).get().then(function (snap) {
+      var d = snap.exists ? (snap.data() || {}) : {};
+      send(d.authorUid || '');
+    }).catch(function (e) { console.warn('reply notif parent', e); });
+  }
+
+  function markNotifsRead(onlyId) {
+    if (!notifsOn() || !fbDb || !isLiveUser()) return;
+    var uid = liveUid();
+    var batch = fbDb.batch();
+    var n = 0;
+    siteNotifs().forEach(function (item) {
+      if (item.read) return;
+      if (onlyId && item.id !== onlyId) return;
+      batch.update(fbDb.collection('users').doc(uid).collection('notifications').doc(item.id), { read: true });
+      n++;
+    });
+    if (!n) return;
+    batch.commit().catch(function (e) {
+      console.warn('mark notifs', e);
+    });
+  }
+
   function dmSiteId() {
-    return SITE_ID || 'gpchat';
+    return SITE_ID;
   }
   function convIdFor(uidA, uidB) {
     return dmSiteId() + '__' + [String(uidA || ''), String(uidB || '')].sort().join('_');
@@ -2586,7 +4676,7 @@
       '.chat-user-picker-head button{background:none;border:0;color:inherit;font-size:1.2rem;cursor:pointer;}' +
       '.chat-picker-item{display:flex;gap:0.7rem;align-items:center;padding:0.75rem 1rem;cursor:pointer;border-bottom:1px solid var(--border,#2c2c32);}' +
       '.chat-picker-item:hover{background:rgba(225,6,0,0.08);}' +
-      '#chat-thread-view[hidden],#chat-placeholder[hidden],#chat-user-picker[hidden],#profile-message-btn[hidden]{display:none!important;}';
+      '#chat-thread-view[hidden],#chat-placeholder[hidden],#chat-user-picker[hidden],#profile-message-btn[hidden],#profile-follow-btn[hidden]{display:none!important;}';
     document.head.appendChild(st);
   }
 
@@ -2643,6 +4733,28 @@
       else return;
     }
     el.textContent = msg || '';
+  }
+
+  function threadPeerName(opts) {
+    opts = opts || {};
+    var fromOpts = String((opts && opts.name) || '').trim();
+    if (fromOpts) return fromOpts;
+    if (pendingPeer && pendingPeer.name) {
+      var fromPeer = String(pendingPeer.name).trim();
+      if (fromPeer) return fromPeer;
+    }
+    var conv = findConv(activeConvId);
+    if (conv) {
+      var fromConv = String(convPeerName(conv) || '').trim();
+      if (fromConv) return fromConv;
+    }
+    return '';
+  }
+
+  function paintActiveChatName(name) {
+    var nameEl = document.getElementById('chat-active-name');
+    if (!nameEl) return;
+    nameEl.textContent = String(name || '').trim() || 'Chat';
   }
 
   function paintChatPlaceholder() {
@@ -2724,7 +4836,7 @@
         sendBtn.textContent = 'Soon';
       } else {
         sendBtn.textContent = 'Send';
-        sendBtn.disabled = !(dmsOn() && isLiveUser() && threadOpen) || blocked;
+        sendBtn.disabled = dmSendInFlight || !(dmsOn() && isLiveUser() && threadOpen) || blocked;
       }
     }
     if (input) {
@@ -2732,8 +4844,9 @@
       input.disabled = !dmsOn() || !isLiveUser() || !threadOpen || blocked;
     }
     if (blocked && threadOpen) chatErr('You blocked this user.');
-    else if (!blocked) chatErr('');
+    if (threadOpen) paintActiveChatName(threadPeerName());
     paintChatPlaceholder();
+    paintDmSendBtn();
   }
 
   function renderThreads() {
@@ -2820,11 +4933,9 @@
     activeConvId = cid;
     var conv = findConv(cid);
     var peerUid = (pendingPeer && pendingPeer.uid) || (conv && convPeerUid(conv)) || '';
-    if (peerUid && (!pendingPeer || pendingPeer.uid !== peerUid)) {
-      pendingPeer = { uid: peerUid, name: opts.name || (conv && convPeerName(conv)) || 'Member' };
-    }
-    var nameEl = document.getElementById('chat-active-name');
-    if (nameEl) nameEl.textContent = opts.name || (conv ? convPeerName(conv) : (pendingPeer && pendingPeer.name) || 'Chat');
+    var displayName = threadPeerName(opts) || 'Chat';
+    if (peerUid) pendingPeer = { uid: peerUid, name: displayName };
+    paintActiveChatName(displayName);
     var overlay = document.getElementById('chat-overlay');
     if (overlay) overlay.classList.add('thread-open');
     syncChatChrome();
@@ -2843,13 +4954,20 @@
       chatErr('You blocked this user.');
       return;
     }
-    pendingPeer = { uid: otherUid, name: dmDisplayName(otherName) };
+    var peerName = dmDisplayName(otherName);
+    if (peerName === 'Member') {
+      var raw = String(otherName || '').trim();
+      if (raw && !looksLikeUid(raw) && raw.indexOf('@') === -1) peerName = raw;
+    }
+    pendingPeer = { uid: otherUid, name: peerName };
+    paintActiveChatName(peerName);
     if (routeFromHash() !== 'chat') go('chat');
     else openChat();
-    openThread(convIdFor(liveUid(), otherUid), { name: pendingPeer.name });
+    openThread(convIdFor(liveUid(), otherUid), { name: peerName });
   }
 
   function sendDm() {
+    if (dmSendInFlight) return;
     if (!dmsOn()) return;
     if (!requireVerified('chat')) return;
     var input = document.getElementById('chat-compose-input');
@@ -2859,71 +4977,90 @@
     var me = liveUid();
     var conv = findConv(activeConvId);
     var other = (pendingPeer && pendingPeer.uid) || (conv && convPeerUid(conv)) || '';
-    if (!me || !other || other === me) return;
+    if (!me || !other || other === me) {
+      chatErr(!me ? 'Sign in to send a message.' : 'Pick who to message first.');
+      return;
+    }
     if (blockedUids[other]) {
       chatErr('You blocked this user.');
       return;
     }
     if (!fbDb) { chatErr('Chat is not connected.'); return; }
+    if (msgCooldownMs() > 0) {
+      chatErr('Wait ' + Math.ceil(msgCooldownMs() / 1000) + 's before another message.');
+      return;
+    }
+    if (!isAdminUser() && !spamFree(text)) {
+      chatErr('That message is blocked by the room spam filter.');
+      return;
+    }
     var peerName = dmDisplayName((pendingPeer && pendingPeer.name) || (conv && convPeerName(conv)) || 'Member');
     var myName = myDisplayName();
     var cid = convIdFor(me, other);
     var convRef = fbDb.collection('conversations').doc(cid);
     var msgRef = convRef.collection('messages').doc();
     var sendBtn = document.getElementById('chat-send-btn');
+    dmSendInFlight = true;
     if (sendBtn) sendBtn.disabled = true;
     chatErr('');
-    fbDb.runTransaction(function (transaction) {
-      return transaction.get(convRef).then(function (snap) {
-        var names = {};
-        names[me] = myName;
-        names[other] = peerName;
-        var unread = {};
-        unread[me] = 0;
-        unread[other] = 1;
-        if (snap.exists) {
-          var d = snap.data() || {};
-          var existingNames = d.participantNames || {};
-          names[me] = myName || dmDisplayName(existingNames[me]);
-          names[other] = dmDisplayName(existingNames[other]) !== 'Member' ? dmDisplayName(existingNames[other]) : peerName;
-          var prev = d.unreadCounts || {};
-          unread[other] = (typeof prev[other] === 'number' ? prev[other] : 0) + 1;
-          transaction.update(convRef, {
-            lastMessage: text,
-            lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
-            lastMessageBy: me,
-            unreadCounts: unread,
-            participantNames: names
-          });
-        } else {
-          transaction.set(convRef, {
-            siteId: dmSiteId(),
-            participants: [me, other],
-            participantNames: names,
-            lastMessage: text,
-            lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
-            lastMessageBy: me,
-            unreadCounts: unread,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-        }
-        transaction.set(msgRef, {
-          fromUid: me,
-          text: text,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-          siteId: dmSiteId()
+    convRef.get().then(function (snap) {
+      var names = {};
+      names[me] = myName;
+      names[other] = peerName;
+      var unread = {};
+      unread[me] = 0;
+      unread[other] = 1;
+      var batch = fbDb.batch();
+      if (snap.exists) {
+        var d = snap.data() || {};
+        var existingNames = d.participantNames || {};
+        names[me] = myName || dmDisplayName(existingNames[me]);
+        names[other] = dmDisplayName(existingNames[other]) !== 'Member' ? dmDisplayName(existingNames[other]) : peerName;
+        var prev = d.unreadCounts || {};
+        unread[other] = (typeof prev[other] === 'number' ? prev[other] : 0) + 1;
+        batch.update(convRef, {
+          lastMessage: text,
+          lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastMessageBy: me,
+          unreadCounts: unread,
+          participantNames: names
         });
+      } else {
+        batch.set(convRef, {
+          siteId: dmSiteId(),
+          participants: [me, other],
+          participantNames: names,
+          lastMessage: text,
+          lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastMessageBy: me,
+          unreadCounts: unread,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+      batch.set(msgRef, {
+        fromUid: me,
+        text: text,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        siteId: dmSiteId()
       });
+      batch.set(fbDb.collection('rateLimits').doc(me), {
+        lastMsgAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      return batch.commit();
     }).then(function () {
+      noteMsgCommitted();
       if (input) {
         input.value = '';
         input.style.height = 'auto';
       }
       activeConvId = cid;
       listenMessages(cid);
-      syncChatChrome();
+      chatErr('');
     }).catch(function (e) {
-      chatErr((e && e.message) ? e.message : 'Could not send.');
+      chatErr(guardPublicErr(e, 'Could not send.', 'dm'));
+    }).finally(function () {
+      dmSendInFlight = false;
+      if (sendBtn) sendBtn.disabled = false;
       syncChatChrome();
     });
   }
@@ -2969,7 +5106,7 @@
       rows.sort(function (a, b) { return a.name.localeCompare(b.name); });
       if (!list) return;
       if (!rows.length) {
-        list.innerHTML = '<div class="soon-panel">No gpchat users yet.</div>';
+        list.innerHTML = '<div class="soon-panel">No ' + escapeHtml((site && site.name) || SITE_ID) + ' users yet.</div>';
         return;
       }
       list.innerHTML = rows.map(function (u) {
@@ -2992,7 +5129,11 @@
   function openChat() {
     closeSocialOverlays();
     hideDmPicker();
-    document.getElementById('chat-overlay').classList.add('active');
+    var overlay = document.getElementById('chat-overlay');
+    if (overlay) {
+      overlay.classList.add('active');
+      if (activeConvId) overlay.classList.add('thread-open');
+    }
     highlightSocial('chat');
     syncChatChrome();
     renderThreads();
@@ -3045,7 +5186,7 @@
     if (!pane) return;
     const mine = livePosts.filter(function (p) { return p.authorUid && p.authorUid === uid; });
     if (!mine.length) {
-      pane.innerHTML = '<div class="empty-note" id="profile-posts-empty">No posts yet. Hit Post when something about the city is on your mind.</div>';
+      pane.innerHTML = '<div class="empty-note" id="profile-posts-empty">' + escapeHtml(skin('profileEmpty', (site && site.emptyState) || 'No posts yet.')) + '</div>';
     } else {
       pane.innerHTML = mine.map(function (p) { return renderPost(p, !!p.parentId); }).join('');
     }
@@ -3067,6 +5208,7 @@
         msgBtn.disabled = false;
       }
       paintProfile(viewingProfile.name || 'Member', viewingProfile.handle || 'member', '', viewingProfile.uid);
+      syncFollowButton();
       return;
     }
 
@@ -3078,6 +5220,7 @@
       if (content) content.hidden = true;
       var top = document.getElementById('profile-topbar-name');
       if (top) top.textContent = 'Profile';
+      syncFollowButton();
       return;
     }
     if (prompt) prompt.hidden = true;
@@ -3085,9 +5228,10 @@
     paintProfile(
       currentUser.name,
       currentUser.handle,
-      currentUser.bio || "Talking about the city.",
+      currentUser.bio || skin('bioDefault', ''),
       currentUser.uid
     );
+    syncFollowButton();
   }
 
   function renderSidebarAuth() {
@@ -3120,7 +5264,7 @@
     } else {
       el.innerHTML = '<button class="sidebar-auth-btn primary" id="auth-signin" type="button">Sign in</button>';
       if (av) {
-        av.textContent = "415";
+        av.textContent = skin('avatarInitials', String(SITE_ID || 'S').replace(/chat$/i, '').slice(0, 3).toUpperCase());
         av.style.background = '';
       }
     }
@@ -3307,8 +5451,8 @@
     var draft = peekCompose();
     currentUser = {
       name: name || 'Guest',
-      handle: (handle || 'guest415').replace(/^@/, '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'guest415',
-      bio: "San Francisco, talking.",
+      handle: (handle || skin('guestHandle', 'guest')).replace(/^@/, '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || skin('guestHandle', 'guest'),
+      bio: skin('bioDefault', ''),
       live: false
     };
     saveJSON(LS_USER, currentUser);
@@ -3320,7 +5464,9 @@
     restoreCompose(draft);
   }
   function signOut() {
+    stopPreviewLift();
     listenMemberNests(null);
+    teardownPeopleSocial();
     if (fbAuth && fbAuth.currentUser) fbAuth.signOut();
     currentUser = null;
     saveJSON(LS_USER, null);
@@ -3329,6 +5475,7 @@
     teardownDms();
     listenConversations();
     syncProfile();
+    renderNotifs();
     renderFeed();
   }
 
@@ -3337,7 +5484,7 @@
     const text = (input && input.value || '').trim();
     const pollReady = pollActive && [...document.querySelectorAll('#compose-poll .compose-poll-input')].filter(function (i) { return i.value.trim(); }).length >= 2;
     const btn = document.getElementById('thoughts-post-btn');
-    if (btn) btn.disabled = !(text || attachedFile || pollReady);
+    paintPostBtn(btn, text, pollReady);
   }
 
   var MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -3511,14 +5658,13 @@
     btn.disabled = true;
     const start = attachedFile ? uploadImage(attachedFile, live.uid) : Promise.resolve(null);
     start.then(function (imageUrl) {
-      const disp = (currentUser && currentUser.name) || live.displayName || (live.email || 'member').split('@')[0] || 'Member';
-      const handle = (currentUser && currentUser.handle) || String(disp).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+      const who = authorForWrite(live);
       const doc = {
         siteId: SITE_ID,
         parentId: parentId,
         authorUid: live.uid,
-        authorName: disp,
-        authorHandle: handle,
+        authorName: who.name,
+        authorHandle: who.handle,
         text: text.slice(0, 280),
         likes: {},
         likeCount: 0,
@@ -3539,13 +5685,14 @@
           };
         }
       }
-      return fbDb.collection('posts').add(doc);
+      return guardedPostWrite(doc);
     }).then(function () {
       input.value = '';
       input.placeholder = input.getAttribute('data-ph') || input.placeholder;
       resetComposeExtras();
       syncPostBtn();
       if (parentId) {
+        writeReplyNotif(parentId, text);
         fbDb.collection('posts').doc(parentId).update({
           replyCount: firebase.firestore.FieldValue.increment(1)
         }).catch(function (e) {
@@ -3553,7 +5700,7 @@
         });
       }
     }).catch(function (e) {
-      composeErr((e && e.message) ? e.message : 'Could not post.');
+      composeErr(guardPublicErr(e, 'Could not post.'));
       console.warn('post', e);
       syncPostBtn();
     });
@@ -3609,6 +5756,10 @@
     }
     if (!fbDb || !postId) return;
     var post = findPost(postId);
+    if (isSessionSeedPost(post)) {
+      composeErr('Reply in the compose box — this is a session ask.');
+      return;
+    }
     var likedBy = (post && post.likedBy) || {};
     var patch = {};
     if (likedBy[uid]) {
@@ -3774,7 +5925,7 @@
         submitNestAdd();
         return;
       }
-      const nestLink = e.target.closest('[data-nest]');
+      const nestLink = e.target.closest('a[data-nest]');
       if (nestLink) {
         e.preventDefault();
         goNest(nestLink.getAttribute('data-nest'));
@@ -3784,6 +5935,47 @@
       if (social) {
         e.preventDefault();
         go(social.dataset.social);
+        return;
+      }
+      if (e.target.closest('#watchlist-add')) {
+        e.preventDefault();
+        if (!isLiveUser()) { openAuth('join'); return; }
+        watchlistPickerOpen = !watchlistPickerOpen;
+        renderWatchlist();
+        if (watchlistPickerOpen) {
+          var watchSearch = document.getElementById('watchlist-search');
+          if (watchSearch) watchSearch.focus();
+        }
+        return;
+      }
+      if (e.target.closest('[data-watch-signin]')) {
+        e.preventDefault();
+        openAuth('join');
+        return;
+      }
+      var watchRemove = e.target.closest('[data-watch-remove]');
+      if (watchRemove) {
+        e.preventDefault();
+        if (!isLiveUser()) { openAuth('join'); return; }
+        removeFromWatchlist(watchRemove.getAttribute('data-watch-remove'));
+        return;
+      }
+      var watchAdd = e.target.closest('[data-watch-add]');
+      if (watchAdd) {
+        e.preventDefault();
+        if (!isLiveUser()) { openAuth('join'); return; }
+        addToWatchlist(watchAdd.getAttribute('data-watch-add'));
+        return;
+      }
+      var watchOpen = e.target.closest('[data-watch-topic]');
+      if (watchOpen) {
+        e.preventDefault();
+        go('topic/' + watchOpen.getAttribute('data-watch-topic'));
+        return;
+      }
+      if (e.target.closest('[data-topic-clear]')) {
+        e.preventDefault();
+        goRoom();
         return;
       }
       if (e.target.closest('#auth-signin') || e.target.closest('#profile-signin-prompt-btn')) {
@@ -3804,6 +5996,10 @@
       }
       if (e.target.closest('#auth-signout')) { signOut(); return; }
 
+      if (e.target.closest('#profile-follow-btn')) {
+        togglePersonFollow();
+        return;
+      }
       if (e.target.closest('#profile-message-btn')) {
         if (!dmsOn()) return;
         if (!isLiveUser()) { openAuth('join'); return; }
@@ -3811,7 +6007,7 @@
         return;
       }
       const profileWho = e.target.closest('[data-profile-uid]');
-      if (profileWho && dmsOn() && !e.target.closest('[data-act]')) {
+      if (profileWho && (dmsOn() || followingOn()) && !e.target.closest('[data-act]')) {
         e.preventDefault();
         openUserProfile(
           profileWho.getAttribute('data-profile-uid'),
@@ -3835,6 +6031,14 @@
       }
       if (e.target.closest('#chat-picker-close')) {
         hideDmPicker();
+        return;
+      }
+
+      const followBtn = e.target.closest('[data-topic-follow]');
+      if (followBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleTopicFollow(followBtn);
         return;
       }
 
@@ -3878,6 +6082,17 @@
         if (!isLiveUser()) { composeErr('Sign in to reply. Guest can only browse.'); openAuth('join'); return; }
         const post = e.target.closest('[data-post-id]');
         if (!post) return;
+        var seedPost = findPost(post.dataset.postId);
+        if (isSessionSeedPost(seedPost)) {
+          replyTo = null;
+          const seedInput = document.getElementById('thoughts-compose-input');
+          if (seedInput) {
+            if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
+            seedInput.placeholder = 'Answer the room…';
+            seedInput.focus();
+          }
+          return;
+        }
         replyTo = post.dataset.parentId || post.dataset.postId;
         const input = document.getElementById('thoughts-compose-input');
         if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
@@ -3902,6 +6117,33 @@
         if (!post) return;
         const p = findPost(post.dataset.postId);
         if (p && p.authorUid) blockUser(p.authorUid);
+        return;
+      }
+
+      const ntab = e.target.closest('[data-notif-tab]');
+      if (ntab) {
+        notifTab = ntab.getAttribute('data-notif-tab') || 'all';
+        document.querySelectorAll('[data-notif-tab]').forEach(function (t) {
+          t.classList.toggle('active', t === ntab);
+        });
+        renderNotifs();
+        return;
+      }
+      const nitem = e.target.closest('[data-notif-id]');
+      if (nitem) {
+        var nid = nitem.getAttribute('data-notif-id');
+        if (nitem.getAttribute('data-notif-type') === 'report') {
+          if (nid) markNotifsRead(nid);
+          openReports();
+          return;
+        }
+        if (nid) markNotifsRead(nid);
+        var pid = nitem.getAttribute('data-post-id');
+        if (pid) {
+          deepPostId = pid;
+          deepPostDone = false;
+          go('home');
+        }
         return;
       }
 
@@ -3961,19 +6203,23 @@
       document.getElementById(id).addEventListener('click', function () { goRoom(); });
     });
     var markRead = document.getElementById('notif-mark-read');
-    if (markRead) markRead.addEventListener('click', function () { /* soon: no live notifs */ });
+    if (markRead) markRead.addEventListener('click', function () { markNotifsRead(); });
 
     var chatNew = document.getElementById('chat-new-btn');
     if (chatNew) chatNew.addEventListener('click', onChatNew);
     var chatPlaceholderNew = document.getElementById('chat-placeholder-new');
     if (chatPlaceholderNew) chatPlaceholderNew.addEventListener('click', onChatNew);
     var chatSend = document.getElementById('chat-send-btn');
-    if (chatSend) chatSend.addEventListener('click', sendDm);
+    if (chatSend) chatSend.addEventListener('click', function () {
+      if (dmSendInFlight) return;
+      sendDm();
+    });
     var chatInput = document.getElementById('chat-compose-input');
     if (chatInput) {
       chatInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
+          if (dmSendInFlight) return;
           sendDm();
         }
       });
@@ -4007,56 +6253,56 @@
     });
     document.getElementById('cv-login-btn').addEventListener('click', function () {
       const err = document.getElementById('cv-login-err');
-      const email = (document.getElementById('cv-login-email').value || '').trim();
-      const pw = document.getElementById('cv-login-pw').value || '';
-      if (!fbAuth) { err.textContent = 'Auth is not ready.'; err.classList.add('show'); return; }
-      err.textContent = '';
-      markAuthLand();
-      fbAuth.signInWithEmailAndPassword(email, pw).catch(function (e) {
-        err.textContent = (e && e.message) ? e.message : 'Sign-in failed.';
-        err.classList.add('show');
+      runWithAuth(err, function () {
+        const email = (document.getElementById('cv-login-email').value || '').trim();
+        const pw = document.getElementById('cv-login-pw').value || '';
+        err.textContent = '';
+        markAuthLand();
+        fbAuth.signInWithEmailAndPassword(email, pw).catch(function (e) {
+          err.textContent = (e && e.message) ? e.message : 'Sign-in failed.';
+          err.classList.add('show');
+        });
       });
     });
     document.getElementById('cv-reg-btn').addEventListener('click', function () {
       const err = document.getElementById('cv-reg-err');
-      const name = (document.getElementById('cv-reg-name').value || '').trim();
-      const email = (document.getElementById('cv-reg-email').value || '').trim();
-      const pw = document.getElementById('cv-reg-pw').value || '';
-      const age = document.getElementById('cv-reg-age');
-      if (!fbAuth) { err.textContent = 'Auth is not ready.'; err.classList.add('show'); return; }
-      if (!age || !age.checked) {
-        err.textContent = 'Confirm you are 13 or older and agree to the preview Terms and Privacy pages.';
-        err.classList.add('show');
-        return;
-      }
-      if (!email || pw.length < 6) { err.textContent = 'Email and a password of at least 6 characters.'; err.classList.add('show'); return; }
-      err.textContent = '';
-      markAuthLand();
-      fbAuth.createUserWithEmailAndPassword(email, pw).then(function (cred) {
-        const disp = name || email.split('@')[0];
-        cred.user.sendEmailVerification().catch(function () {});
-        return cred.user.updateProfile({ displayName: disp }).then(function () {
-          if (fbDb) {
-            return fbDb.collection('users').doc(cred.user.uid).set({
-              displayName: disp,
-                            siteId: SITE_ID,
-              createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-          }
-        }).then(function () {
-          composeErr('Account created. Verify your email before posting.');
+      runWithAuth(err, function () {
+        const name = (document.getElementById('cv-reg-name').value || '').trim();
+        const email = (document.getElementById('cv-reg-email').value || '').trim();
+        const pw = document.getElementById('cv-reg-pw').value || '';
+        const age = document.getElementById('cv-reg-age');
+        if (!age || !age.checked) {
+          err.textContent = ageGateMessage();
+          err.classList.add('show');
+          return;
+        }
+        if (name && !nameOk(name)) {
+          err.textContent = 'That display name is reserved.';
+          err.classList.add('show');
+          return;
+        }
+        if (!email || pw.length < 6) { err.textContent = 'Email and a password of at least 6 characters.'; err.classList.add('show'); return; }
+        err.textContent = '';
+        markAuthLand();
+        fbAuth.createUserWithEmailAndPassword(email, pw).then(function (cred) {
+          cred.user.sendEmailVerification().catch(function () {});
+          return ensurePublicProfile(cred.user, name, {
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          }).then(function () {
+            composeErr('Account created. Verify your email before posting.');
+          });
+        }).catch(function (e) {
+          err.textContent = (e && e.message) ? e.message : 'Could not create account.';
+          err.classList.add('show');
         });
-      }).catch(function (e) {
-        err.textContent = (e && e.message) ? e.message : 'Could not create account.';
-        err.classList.add('show');
       });
     });
     document.getElementById('cv-google-login').addEventListener('click', function () {
       var err = document.getElementById('cv-login-err');
-      if (!fbAuth) { err.textContent = 'Auth is not ready.'; err.classList.add('show'); return; }
+      runWithAuth(err, function () {
       var age = document.getElementById('cv-google-age');
       if (!age || !age.checked) {
-        err.textContent = 'Confirm you are 13 or older and agree to the preview Terms and Privacy pages.';
+        err.textContent = ageGateMessage();
         err.classList.add('show');
         return;
       }
@@ -4070,13 +6316,10 @@
       function finishGoogle(cred) {
         var u = cred && cred.user;
         if (fbDb && u) {
-          var disp = u.displayName || (u.email || 'member').split('@')[0];
-          return fbDb.collection('users').doc(u.uid).set({
-            displayName: disp,
-            siteId: SITE_ID,
+          return ensurePublicProfile(u, '', {
             provider: 'google',
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
+          });
         }
       }
       function failGoogle(e) {
@@ -4101,8 +6344,9 @@
           failGoogle(e);
         });
       }
+      });
     });
-    document.getElementById('cv-guest-login').addEventListener('click', function () { stubSignIn('Guest', 'guest415'); });
+    document.getElementById('cv-guest-login').addEventListener('click', function () { stubSignIn('Guest', skin('guestHandle', 'guest')); });
 
     const search = document.getElementById('explore-search-input');
     search.addEventListener('input', function () {
@@ -4114,14 +6358,15 @@
         });
       }
       function cards(list) {
-        if (!list.length) return '<p class="empty-note">Nothing in the 415 matched that.</p>';
+        if (!list.length) return '<p class="empty-note">' + escapeHtml(skin('exploreEmpty', 'Nothing in this room matched that.')) + '</p>';
         return list.map(function (c) {
           return '<article class="explore-card"><div class="explore-card-tag">' + escapeHtml(c.tag) +
             '</div><div class="explore-card-title">' + escapeHtml(c.title) +
             '</div><div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div></article>';
         }).join('');
       }
-      document.getElementById('explore-pane-places').innerHTML = cards(filt(PLACES));
+      var seats = nestSeatCards();
+      document.getElementById('explore-pane-places').innerHTML = cards(filt(seats.length ? seats : PLACES));
       document.getElementById('explore-pane-topics').innerHTML = cards(filt(TOPICS));
       ensureExploreNestTab();
       var nestPane = document.getElementById('explore-pane-nests');
@@ -4153,7 +6398,7 @@
     return !!(storiesCfg().enabled);
   }
   function storiesComposePlaceholder() {
-    return (site && site.composePlaceholder) || "What still plays?";
+    return skin('storiesPlaceholder', (site && site.composePlaceholder) || 'What is happening right now?');
   }
   function storiesMaxBytes() {
     var n = parseInt(storiesCfg().maxBytes, 10);
@@ -4604,8 +6849,9 @@
     wait.then(function () {
       return storyFile ? uploadStoryMedia(storyFile, live.uid, docRef.id) : Promise.resolve('');
     }).then(function (mediaUrl) {
-      var disp = (currentUser && currentUser.name) || live.displayName || (live.email || 'member').split('@')[0] || 'Member';
-      var handle = (currentUser && currentUser.handle) || String(disp).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+      var who = authorForWrite(live);
+      var disp = who.name;
+      var handle = who.handle;
       var now = firebase.firestore.Timestamp.now();
       var doc = {
         siteId: SITE_ID,
@@ -4939,8 +7185,8 @@
           el.hidden = false;
           el.innerHTML =
             '<button type="button" class="stories-item is-add" data-story-add="1" aria-label="Add story">' +
-              '<span class="stories-ring"><span class="stories-avatar" style="background:' + colorFor(SITE_ID || '27') + '">' +
-              escapeHtml(String(SITE_ID || '27').replace(/chat$/i, '').slice(0, 3).toUpperCase() || '27') + '</span>' +
+              '<span class="stories-ring"><span class="stories-avatar" style="background:' + colorFor(SITE_ID || 'room') + '">' +
+              escapeHtml(String(SITE_ID || 'room').replace(/chat$/i, '').slice(0, 3).toUpperCase() || 'ME') + '</span>' +
               '<span class="stories-add-badge">+</span></span>' +
               '<span class="stories-label">Add story</span></button>';
         },
@@ -4952,8 +7198,8 @@
               id: s.id || ('demo-' + i),
               siteId: SITE_ID,
               authorUid: s.authorUid || ('demo-' + i),
-              name: s.name || (site && site.name) || '27chat',
-              handle: s.handle || SITE_ID || '27chat',
+              name: s.name || (site && site.name) || 'room',
+              handle: s.handle || SITE_ID || 'room',
               type: s.type || 'text',
               text: s.text || '',
               mediaUrl: s.mediaUrl || '',
@@ -4982,43 +7228,12 @@
     applyTheme(site.theme);
     applySiteChrome();
     ensureJoinAuthLayout();
+    paintAgeLabels();
+    wirePreviewLift();
     ensureDmCss();
     hideDummyChrome();
     syncChatChrome();
 
-    if (fbAuth) {
-      fbAuth.getRedirectResult().then(function (cred) {
-        var u = cred && cred.user;
-        if (fbDb && u) {
-          var disp = u.displayName || (u.email || 'member').split('@')[0];
-          return fbDb.collection('users').doc(u.uid).set({
-            displayName: disp,
-            siteId: SITE_ID,
-            provider: 'google',
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
-        }
-      }).catch(function () {});
-      fbAuth.onAuthStateChanged(function (user) {
-        if (user) applyFbUser(user);
-        else {
-          listenMemberNests(null);
-          listenBlocks(null);
-          if (currentUser && currentUser.live) {
-            currentUser = null;
-            saveJSON(LS_USER, null);
-            renderSidebarAuth();
-            hideDummyChrome();
-            teardownDms();
-            listenConversations();
-            syncProfile();
-            renderFeed();
-          }
-        }
-      });
-    }
-
-    listenKillSwitch();
     wireEvents();
     document.addEventListener('subx-auth-land', function () { landInFeedCompose(); });
     renderTrends();
@@ -5026,9 +7241,10 @@
     renderNotifs();
     renderThreads();
     renderSidebarAuth();
-    listenLivePosts();
     renderFeed();
-    initStories();
+    railOverlayUiReady = true;
+    wireRailOverlay();
+    maybeShowRailOverlay();
 
     restoreBouncedPath();
     window.addEventListener('hashchange', applyRoute);
@@ -5045,7 +7261,46 @@
       selectThoughtsTab('foryou');
     }
     syncHamburgerAria();
-    try { var k='subx.vid'; var v=localStorage.getItem(k); if (!v) { v=Math.random().toString(36).slice(2)+Date.now().toString(36); localStorage.setItem(k,v); } if (!sessionStorage.getItem('subx.hit.'+SITE_ID)) { sessionStorage.setItem('subx.hit.'+SITE_ID,'1'); navigator.sendBeacon('https://us-central1-subx-skins.cloudfunctions.net/pixel?s='+encodeURIComponent(SITE_ID)+'&v='+encodeURIComponent(v)); } } catch (e) {}
+    try { if (!sessionStorage.getItem('subx.hit.'+SITE_ID)) { sessionStorage.setItem('subx.hit.'+SITE_ID,'1'); sendPixel(); } } catch (e) {}
+
+    fbReadyPromise.then(function () {
+      if (fbAuth) {
+        fbAuth.getRedirectResult().then(function (cred) {
+          var u = cred && cred.user;
+          if (fbDb && u) {
+            return ensurePublicProfile(u, '', {
+              provider: 'google',
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        }).catch(function () {});
+        fbAuth.onAuthStateChanged(function (user) {
+          if (user) applyFbUser(user);
+          else {
+            stopPreviewLift();
+            listenMemberNests(null);
+            listenBlocks(null);
+            teardownPeopleSocial();
+            if (currentUser && currentUser.live) {
+              currentUser = null;
+              saveJSON(LS_USER, null);
+              renderSidebarAuth();
+              hideDummyChrome();
+              teardownDms();
+              listenConversations();
+              syncProfile();
+              renderNotifs();
+              renderFeed();
+            } else {
+              renderWatchlist();
+            }
+          }
+        });
+      }
+      listenKillSwitch();
+      listenLivePosts();
+      initStories();
+    });
   }
 
   fetch(SITE_JSON_URL)
@@ -5057,6 +7312,6 @@
     .catch(function (e) {
       console.warn('site.json', e);
       composeErr((e && e.message) ? e.message : 'Could not load site.json');
-      boot({ siteId: "415chat", name: "415chat", tagline: "San Francisco, talking." });
+      boot({ siteId: (location.hostname || 'room').replace(/^www\./, '').replace(/\.[a-z]+$/, ''), name: (location.hostname || 'SubX').replace(/^www\./, ''), tagline: '' });
     });
 })();
