@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""Render the Story 01 share card.
+"""Render a story share card.
 
-Writes stories/01-jim-morrison-paris/card.png at 1200x630.
+Writes a 1200x630 PNG. The default story is 01 (Jim Morrison), which keeps
+the original output path and the original four lines.
 
 Colors are read from the :root custom properties in styles.css, which match
-the theme object in site.json. The title uses EB Garamond (styles.css
---display). The kicker, dateline, and footer use Inter (styles.css --ui).
-Both families are bundled, unmodified, under scripts/fonts and are licensed
-under the SIL Open Font License, Version 1.1 (see the OFL.txt beside each
-family).
+the theme object in site.json. Titles use EB Garamond (styles.css --display).
+The kicker, third line, and footer use Inter (styles.css --ui). Both families
+are bundled, unmodified, under scripts/fonts and are licensed under the SIL
+Open Font License, Version 1.1 (see the OFL.txt beside each family).
 
-The card is text only: the four lines specified for Story 01, and no
-photographs, portraits, grave images, death dates, or memorial imagery.
+Each card is text only: the lines specified for that story, and no
+photographs, portraits, likenesses, or memorial imagery.
 
 Requires Pillow. From the repo root:
 
     python3 scripts/make_story_card.py
+    python3 scripts/make_story_card.py 02
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
 CSS_PATH = ROOT / "styles.css"
-OUT_PATH = ROOT / "stories" / "01-jim-morrison-paris" / "card.png"
 FONT_DIR = Path(__file__).resolve().parent / "fonts"
 GARAMOND_PATH = FONT_DIR / "eb-garamond" / "EBGaramond[wght].ttf"
 INTER_MEDIUM_PATH = FONT_DIR / "inter" / "Inter-Medium.ttf"
@@ -35,18 +36,35 @@ INTER_REGULAR_PATH = FONT_DIR / "inter" / "Inter-Regular.ttf"
 
 WIDTH = 1200
 HEIGHT = 630
-
-KICKER = "STORY 01"
-TITLE = "How Jim Morrison Came to Rest in Paris"
-# Typographic wrap of TITLE. The words and their order are unchanged.
-TITLE_LINES = ("How Jim Morrison", "Came to Rest in Paris")
-DATELINE = "Paris, 1971 \u00b7 P\u00e8re Lachaise"
 FOOTER = "27chat \u2014 The work didn't stop."
 
-assert " ".join(TITLE_LINES) == TITLE
-assert DATELINE == "Paris, 1971 \u00b7 P\u00e8re Lachaise"
+# Card copy is the cleared line spec for each story. Story 01's title is
+# wrapped; the words and their order are unchanged. Story 02 uses the single
+# large line and the third line from its META card spec.
+STORIES = {
+    "01": {
+        "out": ROOT / "stories" / "01-jim-morrison-paris" / "card.png",
+        "kicker": "STORY 01",
+        "title": "How Jim Morrison Came to Rest in Paris",
+        "title_lines": ("How Jim Morrison", "Came to Rest in Paris"),
+        "dateline": "Paris, 1971 \u00b7 P\u00e8re Lachaise",
+    },
+    "02": {
+        "out": ROOT / "stories" / "02-amy-winehouse" / "card.png",
+        "kicker": "STORY 02",
+        "title": "Amy Winehouse's Music",
+        "title_lines": ("Amy Winehouse's Music",),
+        "dateline": "Frank \u00b7 Back to Black \u00b7 Lioness",
+    },
+}
+
+assert STORIES["01"]["dateline"] == "Paris, 1971 \u00b7 P\u00e8re Lachaise"
+assert STORIES["02"]["dateline"] == "Frank \u00b7 Back to Black \u00b7 Lioness"
 assert FOOTER == "27chat \u2014 The work didn't stop."
 assert "\u2019" not in FOOTER
+for spec in STORIES.values():
+    assert " ".join(spec["title_lines"]) == spec["title"]
+    assert "\u2019" not in spec["title"]
 
 
 def theme_colors(css_path: Path) -> dict[str, str]:
@@ -98,17 +116,23 @@ def draw_tracked(
 
 
 def fit_title(
-    draw: ImageDraw.ImageDraw, max_width: float
+    draw: ImageDraw.ImageDraw, title_lines: tuple[str, ...], max_width: float
 ) -> tuple[ImageFont.FreeTypeFont, int]:
     for size in range(92, 47, -1):
         font = garamond(size, 600)
-        widest = max(text_width(draw, line, font) for line in TITLE_LINES)
+        widest = max(text_width(draw, line, font) for line in title_lines)
         if widest <= max_width:
             return font, size
     raise SystemExit("title does not fit the card")
 
 
-def main() -> None:
+def render(story_id: str) -> None:
+    spec = STORIES[story_id]
+    title_lines: tuple[str, ...] = spec["title_lines"]
+    kicker = spec["kicker"]
+    dateline = spec["dateline"]
+    out_path: Path = spec["out"]
+
     colors = theme_colors(CSS_PATH)
     background = rgb(colors["bg"])
     nav = rgb(colors["nav-bg"])
@@ -128,11 +152,11 @@ def main() -> None:
     kicker_size = 22
     kicker_font = ImageFont.truetype(str(INTER_MEDIUM_PATH), kicker_size)
     kicker_tracking = 5.5
-    title_font, title_size = fit_title(draw, max_width)
+    title_font, title_size = fit_title(draw, title_lines, max_width)
     dateline_font = ImageFont.truetype(str(INTER_REGULAR_PATH), 28)
     footer_font = ImageFont.truetype(str(INTER_MEDIUM_PATH), 24)
 
-    if text_width(draw, DATELINE, dateline_font) > max_width:
+    if text_width(draw, dateline, dateline_font) > max_width:
         raise SystemExit("dateline does not fit the card")
     if text_width(draw, FOOTER, footer_font) > max_width:
         raise SystemExit("footer does not fit the card")
@@ -143,13 +167,19 @@ def main() -> None:
     title_gap = int(round(title_size * 0.18))
     stack_gaps = (26, 32, 40)
 
-    title_block = (
-        title_ascent
-        + title_descent
-        + title_gap
-        + title_ascent
-        + title_descent
-    )
+    if len(title_lines) == 2:
+        title_block = (
+            title_ascent
+            + title_descent
+            + title_gap
+            + title_ascent
+            + title_descent
+        )
+    elif len(title_lines) == 1:
+        title_block = title_ascent + title_descent
+    else:
+        raise SystemExit("card title must be 1 or 2 lines")
+
     stack_height = (
         kicker_ascent
         + stack_gaps[0]
@@ -167,17 +197,17 @@ def main() -> None:
     draw.rectangle((0, 0, 7, HEIGHT), fill=accent)
 
     y = top + kicker_ascent
-    draw_tracked(draw, (pad_left, y), KICKER, kicker_font, accent, kicker_tracking)
+    draw_tracked(draw, (pad_left, y), kicker, kicker_font, accent, kicker_tracking)
     y += stack_gaps[0]
     draw.rectangle((pad_left, y, pad_left + 72, y + 3), fill=accent)
     y += 3 + stack_gaps[1] + title_ascent
 
-    for index, line in enumerate(TITLE_LINES):
+    for index, line in enumerate(title_lines):
         draw.text((pad_left, y), line, font=title_font, fill=ink, anchor="ls")
-        if index == 0:
+        if index < len(title_lines) - 1:
             y += title_descent + title_gap + title_ascent
     y += title_descent + stack_gaps[2] + date_ascent
-    draw.text((pad_left, y), DATELINE, font=dateline_font, fill=muted, anchor="ls")
+    draw.text((pad_left, y), dateline, font=dateline_font, fill=muted, anchor="ls")
 
     band_top = HEIGHT - footer_band
     draw.rectangle((0, band_top, WIDTH, HEIGHT), fill=nav)
@@ -200,12 +230,19 @@ def main() -> None:
         anchor="ls",
     )
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    image.save(OUT_PATH, "PNG", optimize=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_path, "PNG", optimize=True)
     print(
-        f"wrote {OUT_PATH.relative_to(ROOT)} {image.size[0]}x{image.size[1]} "
+        f"wrote {out_path.relative_to(ROOT)} {image.size[0]}x{image.size[1]} "
         f"title {title_size}px"
     )
+
+
+def main() -> None:
+    story_id = sys.argv[1] if len(sys.argv) > 1 else "01"
+    if story_id not in STORIES:
+        raise SystemExit(f"unknown story {story_id!r}; choose from {', '.join(STORIES)}")
+    render(story_id)
 
 
 if __name__ == "__main__":
