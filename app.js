@@ -29,17 +29,24 @@
         '.news-item-stories{display:block;padding:1rem 1.4rem;border-bottom:1px solid rgba(255,255,255,0.06);}' +
         '.news-item-stories .news-item-story{display:block;margin-top:0.55rem;font-size:0.92rem;font-weight:600;line-height:1.4;color:var(--text,#f0ebe6);text-decoration:none;}' +
         '.news-item-stories .news-item-story:hover{text-decoration:underline;}' +
-        '.nest-chrome-story{display:block;}';
+        '.nest-chrome-story{display:block;}' +
+        '.story-streamer{display:flex;align-items:center;gap:0.35rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border,#2e2834);background:var(--surface,#1c1822);}' +
+        '.story-streamer-link{display:flex;align-items:baseline;gap:0.55rem;min-width:0;flex:1;color:var(--text,#f0ebe6);text-decoration:none;font-size:0.86rem;line-height:1.3;}' +
+        '.story-streamer-label{flex:none;font-size:0.68rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent,#c4a574);}' +
+        '.story-streamer-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}' +
+        '.story-streamer-x{flex:none;width:1.7rem;height:1.7rem;padding:0;border:0;border-radius:999px;background:transparent;color:var(--text-muted,#9a9088);font-size:1.15rem;line-height:1;cursor:pointer;}' +
+        '.story-streamer-x:hover,.story-streamer-x:focus-visible{color:var(--text,#f0ebe6);}' +
+        '@media (max-width:900px){.story-streamer{padding-left:3.8rem;}}';
       document.head.appendChild(st);
     }
 
     function buildCard(items) {
       var card = document.createElement('nav');
       card.className = 'news-item news-item-stories';
-      card.setAttribute('aria-label', 'Stories');
+      card.setAttribute('aria-label', 'Featured Stories');
       var tag = document.createElement('div');
       tag.className = 'news-item-tag';
-      tag.textContent = 'Stories';
+      tag.textContent = 'Featured Stories';
       card.appendChild(tag);
       items.forEach(function (item) {
         var a = document.createElement('a');
@@ -81,6 +88,42 @@
           if (!nestHref || nestHref === '/stories/') continue;
           storyBySlug[String(nest.slug).toLowerCase()] = nestHref;
         }
+        var rawStreamer = (site && site.streamer) || {};
+        var streamer = null;
+        if (rawStreamer.enabled) {
+          var streamHref = storyHref(rawStreamer.url);
+          var streamText = String(rawStreamer.text || '').trim();
+          if (streamHref && streamText) {
+            streamer = {
+              label: String(rawStreamer.label || 'New story').trim() || 'New story',
+              text: streamText,
+              url: streamHref
+            };
+          }
+        }
+        var DISMISS_KEY = '27chat.streamerDismissed';
+        function dismissedMap() {
+          try {
+            var raw = localStorage.getItem(DISMISS_KEY);
+            var map = raw ? JSON.parse(raw) : {};
+            return map && typeof map === 'object' ? map : {};
+          } catch (e) { return {}; }
+        }
+        function isDismissed(storyUrl) {
+          return !!dismissedMap()[storyUrl];
+        }
+        function dismissStreamer(storyUrl) {
+          try {
+            var map = dismissedMap();
+            map[storyUrl] = 1;
+            localStorage.setItem(DISMISS_KEY, JSON.stringify(map));
+          } catch (e) {}
+        }
+        function onHomeFeed() {
+          if (nestSlugFromLocation()) return false;
+          var home = document.getElementById('page-thoughts');
+          return !!(home && home.classList.contains('active'));
+        }
         ensureCss();
 
         function paintRail() {
@@ -116,9 +159,55 @@
           else bar.insertAdjacentElement('afterbegin', a);
         }
 
+        function paintStreamer() {
+          var page = document.getElementById('page-thoughts');
+          if (!page) return;
+          var existing = document.getElementById('story-streamer');
+          var show = !!(streamer && onHomeFeed() && !isDismissed(streamer.url));
+          if (!show) {
+            if (existing) existing.remove();
+            return;
+          }
+          if (existing && existing.getAttribute('data-url') === streamer.url) {
+            if (page.firstChild !== existing) page.insertBefore(existing, page.firstChild);
+            return;
+          }
+          if (existing) existing.remove();
+          var bar = document.createElement('div');
+          bar.id = 'story-streamer';
+          bar.className = 'story-streamer';
+          bar.setAttribute('data-url', streamer.url);
+          var link = document.createElement('a');
+          link.className = 'story-streamer-link';
+          link.setAttribute('href', streamer.url);
+          var label = document.createElement('span');
+          label.className = 'story-streamer-label';
+          label.textContent = streamer.label;
+          var text = document.createElement('span');
+          text.className = 'story-streamer-text';
+          text.textContent = streamer.text;
+          link.appendChild(label);
+          link.appendChild(text);
+          var dismiss = document.createElement('button');
+          dismiss.type = 'button';
+          dismiss.className = 'story-streamer-x';
+          dismiss.setAttribute('aria-label', 'Dismiss');
+          dismiss.textContent = '\u00d7';
+          dismiss.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismissStreamer(streamer.url);
+            paint();
+          });
+          bar.appendChild(link);
+          bar.appendChild(dismiss);
+          page.insertBefore(bar, page.firstChild);
+        }
+
         function paint() {
           paintRail();
           paintNest();
+          paintStreamer();
         }
 
         paint();

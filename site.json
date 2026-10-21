@@ -611,6 +611,12 @@
     "maxSeconds": 15,
     "maxBytes": 8000000
   },
+  "streamer": {
+    "enabled": true,
+    "label": "New story",
+    "text": "Kurt Cobain: Aberdeen to Nevermind and Unplugged",
+    "url": "/stories/05-kurt-cobain/"
+  },
   "rail": {
     "kind": "porch",
     "title": "Room Brief",
@@ -1075,8 +1081,8 @@
       "nav": true
     }
   ],
-  "v": 8,
-  "cacheBust": 8,
+  "v": 9,
+  "cacheBust": 9,
   "pixel": false,
   "redditCrosspost": false,
   "features": {
