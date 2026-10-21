@@ -1,6 +1,145 @@
 (function () {
   'use strict';
 
+  // factory.js owns the shell. When it is on the page, this file only mounts
+  // story links from site.json (rail.stories and nest.story).
+  function mountRoomStories() {
+    var script = document.querySelector('script[data-site]');
+    var url = (script && script.getAttribute('data-site')) || 'site.json';
+
+    function storyHref(value) {
+      var s = String(value || '').trim();
+      if (!/^\/stories\/(?:[a-z0-9-]+\/)?$/.test(s)) return '';
+      return s;
+    }
+
+    function nestSlugFromLocation() {
+      var parts = String(location.pathname || '').split('/').filter(Boolean);
+      if (parts.length !== 1) return '';
+      var slug = parts[0].replace(/\.html$/i, '').toLowerCase();
+      if (!slug || slug === 'index') return '';
+      return slug;
+    }
+
+    function ensureCss() {
+      if (document.getElementById('room-stories-css')) return;
+      var st = document.createElement('style');
+      st.id = 'room-stories-css';
+      st.textContent =
+        '.news-item-stories{display:block;padding:1rem 1.4rem;border-bottom:1px solid rgba(255,255,255,0.06);}' +
+        '.news-item-stories .news-item-story{display:block;margin-top:0.55rem;font-size:0.92rem;font-weight:600;line-height:1.4;color:var(--text,#f0ebe6);text-decoration:none;}' +
+        '.news-item-stories .news-item-story:hover{text-decoration:underline;}' +
+        '.nest-chrome-story{display:block;}';
+      document.head.appendChild(st);
+    }
+
+    function buildCard(items) {
+      var card = document.createElement('nav');
+      card.className = 'news-item news-item-stories';
+      card.setAttribute('aria-label', 'Stories');
+      var tag = document.createElement('div');
+      tag.className = 'news-item-tag';
+      tag.textContent = 'Stories';
+      card.appendChild(tag);
+      items.forEach(function (item) {
+        var a = document.createElement('a');
+        a.className = 'news-item-story';
+        a.setAttribute('href', item.url);
+        a.textContent = item.headline;
+        card.appendChild(a);
+      });
+      var all = document.createElement('a');
+      all.className = 'news-item-story';
+      all.setAttribute('href', '/stories/');
+      all.textContent = 'All stories';
+      card.appendChild(all);
+      return card;
+    }
+
+    fetch(url, { credentials: 'omit' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Could not load ' + url);
+        return res.json();
+      })
+      .then(function (site) {
+        var rail = (site && site.rail) || {};
+        var items = [];
+        var list = Array.isArray(rail.stories) ? rail.stories : [];
+        for (var i = 0; i < list.length; i++) {
+          var row = list[i];
+          if (!row || !row.headline) continue;
+          var href = storyHref(row.url);
+          if (!href || href === '/stories/') continue;
+          items.push({ headline: String(row.headline), url: href });
+        }
+        var storyBySlug = {};
+        var nests = (site && site.nests) || [];
+        for (var n = 0; n < nests.length; n++) {
+          var nest = nests[n];
+          if (!nest || !nest.slug) continue;
+          var nestHref = storyHref(nest.story);
+          if (!nestHref || nestHref === '/stories/') continue;
+          storyBySlug[String(nest.slug).toLowerCase()] = nestHref;
+        }
+        ensureCss();
+
+        function paintRail() {
+          var feed = document.getElementById('news-feed');
+          if (!feed) return;
+          var onNest = !!nestSlugFromLocation();
+          var card = feed.querySelector(':scope > .news-item-stories');
+          if (onNest || !items.length) {
+            if (card) card.remove();
+            return;
+          }
+          if (!card) card = buildCard(items);
+          if (feed.firstChild !== card) feed.insertBefore(card, feed.firstChild);
+        }
+
+        function paintNest() {
+          var bar = document.getElementById('nest-chrome');
+          if (!bar || bar.hidden) return;
+          var href = storyBySlug[nestSlugFromLocation()] || '';
+          var link = bar.querySelector('.nest-chrome-story');
+          if (!href) {
+            if (link) link.remove();
+            return;
+          }
+          if (link && link.getAttribute('href') === href) return;
+          if (link) link.remove();
+          var a = document.createElement('a');
+          a.className = 'nest-chrome-home nest-chrome-story';
+          a.setAttribute('href', href);
+          a.textContent = 'Read the story';
+          var label = bar.querySelector('.nest-chrome-label');
+          if (label) label.insertAdjacentElement('afterend', a);
+          else bar.insertAdjacentElement('afterbegin', a);
+        }
+
+        function paint() {
+          paintRail();
+          paintNest();
+        }
+
+        paint();
+        var obs = new MutationObserver(paint);
+        var feed = document.getElementById('news-feed');
+        var page = document.getElementById('page-thoughts');
+        if (feed) obs.observe(feed, { childList: true });
+        if (page) obs.observe(page, { childList: true, subtree: true });
+        window.addEventListener('popstate', paint);
+        window.addEventListener('hashchange', paint);
+      })
+      .catch(function (err) {
+        console.warn('room stories', err);
+      });
+  }
+
+  if (document.querySelector('script[src*="factory.js"]')) {
+    mountRoomStories();
+    return;
+  }
+
   const MOBILE_NAV_MQ = 900;
   const LS_USER = '27chat.user';
   const LS_LIKES = '27chat.likes';
