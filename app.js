@@ -30,7 +30,7 @@
         '.news-item-stories .news-item-story{display:block;margin-top:0.55rem;font-size:0.92rem;font-weight:600;line-height:1.4;color:var(--text,#f0ebe6);text-decoration:none;}' +
         '.news-item-stories .news-item-story:hover{text-decoration:underline;}' +
         '.nest-chrome-story{display:block;}' +
-        '.story-streamer{display:flex;align-items:center;gap:0.35rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border,#2e2834);background:var(--surface,#1c1822);}' +
+        '.story-streamer{display:flex;align-items:center;gap:0.35rem;margin-top:0.2rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border,#2e2834);background:var(--surface,#1c1822);}' +
         '.story-streamer-link{display:flex;align-items:baseline;gap:0.55rem;min-width:0;flex:1;color:var(--text,#f0ebe6);text-decoration:none;font-size:0.86rem;line-height:1.3;}' +
         '.story-streamer-label{flex:none;font-size:0.68rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent,#c4a574);}' +
         '.story-streamer-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}' +
