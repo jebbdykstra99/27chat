@@ -1,3 +1,45 @@
+# 27chat robots.txt
+# Story pages under /stories/ may be indexed (approved 2026-10-21).
+# Everything else stays out of search. Accounts are not open.
+# Do not scrape or use any content for AI training (named bots below stay blocked).
+
 User-agent: *
+Allow: /stories/
 Disallow: /
-# Preview lock. Accounts are not open.
+
+# AI answer/search bots may reach /stories/ only.
+User-agent: OAI-SearchBot
+Allow: /stories/
+Disallow: /
+
+User-agent: ChatGPT-User
+Allow: /stories/
+Disallow: /
+
+User-agent: PerplexityBot
+Allow: /stories/
+Disallow: /
+
+User-agent: Claude-SearchBot
+Allow: /stories/
+Disallow: /
+
+User-agent: Claude-User
+Allow: /stories/
+Disallow: /
+
+# AI training crawlers stay fully blocked, including /stories/.
+User-agent: GPTBot
+User-agent: CCBot
+User-agent: Google-Extended
+User-agent: Bytespider
+User-agent: ClaudeBot
+User-agent: anthropic-ai
+User-agent: Applebot-Extended
+User-agent: Meta-ExternalAgent
+User-agent: cohere-ai
+User-agent: Diffbot
+User-agent: omgili
+Disallow: /
+
+Sitemap: https://27chat.com/sitemap-stories.xml

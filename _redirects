@@ -1,4 +1,17 @@
 # Cloudflare Pages: nest rooms are the same shell at /{slug}.
-# Existing files (factory.js, site.json, terms.html, …) still win.
-# GitHub Pages ignores this file — use 404.html bounce or a Pages 404 → index fallback.
+# GitHub Pages ignores this file. Missing paths use 404.html.
+#
+# These 200s are listed before the splat so a host that applies the first
+# matching redirect, even when a file exists, still serves the file itself.
+# They are not forced (no "!"). A host that prefers an existing file still
+# serves that file. Do not send /robots.txt or /sitemap-stories.xml to index.html.
+# /stories/ is static HTML and must not be replaced by the SPA shell.
+
+/robots.txt              /robots.txt              200
+/sitemap-stories.xml     /sitemap-stories.xml     200
+/stories/                /stories/                200
+/stories/*               /stories/:splat          200
+
+# Existing files (factory.js, site.json, terms.html, …) still win when the
+# host checks assets before redirects.
 /*    /index.html   200
