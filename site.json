@@ -611,6 +611,12 @@
     "maxSeconds": 15,
     "maxBytes": 8000000
   },
+  "streamer": {
+    "enabled": true,
+    "label": "New story",
+    "text": "Kurt Cobain: Aberdeen to Nevermind and Unplugged",
+    "url": "/stories/05-kurt-cobain/"
+  },
   "rail": {
     "kind": "porch",
     "title": "Room Brief",
@@ -625,6 +631,28 @@
       ],
       "dwellMs": 9000
     },
+    "stories": [
+      {
+        "headline": "Kurt Cobain: Aberdeen to Nevermind and Unplugged",
+        "url": "/stories/05-kurt-cobain/"
+      },
+      {
+        "headline": "Robert Johnson's Work: The 1936–37 Sessions, 29 Songs, and the Crossroads Legend",
+        "url": "/stories/04-robert-johnson/"
+      },
+      {
+        "headline": "Jimi Hendrix's Work: From the R&B Road to Electric Lady, and the Legends",
+        "url": "/stories/03-jimi-hendrix/"
+      },
+      {
+        "headline": "Amy Winehouse's Music: Frank, Back to Black, Lioness and the Legends",
+        "url": "/stories/02-amy-winehouse/"
+      },
+      {
+        "headline": "How Jim Morrison Came to Rest in Paris",
+        "url": "/stories/01-jim-morrison-paris/"
+      }
+    ],
     "outbound": [
       {
         "tag": "Board",
@@ -829,6 +857,7 @@
       "parent": "voices",
       "kind": "people",
       "blurb": "Cross Road Blues. The 1936 sides. Guitar that still sits between the verses.",
+      "story": "/stories/04-robert-johnson/",
       "nav": true
     },
     {
@@ -845,6 +874,7 @@
       "parent": "voices",
       "kind": "people",
       "blurb": "Are You Experienced. Feedback as composition, not noise.",
+      "story": "/stories/03-jimi-hendrix/",
       "nav": true
     },
     {
@@ -861,6 +891,7 @@
       "parent": "voices",
       "kind": "people",
       "blurb": "The Doors — the long song as a room you can still enter. Poet first tonight.",
+      "story": "/stories/01-jim-morrison-paris/",
       "nav": true
     },
     {
@@ -917,6 +948,7 @@
       "parent": "voices",
       "kind": "people",
       "blurb": "Nevermind / Lithium. Quiet-loud as architecture. The tape still has air.",
+      "story": "/stories/05-kurt-cobain/",
       "nav": true
     },
     {
@@ -933,6 +965,7 @@
       "parent": "voices",
       "kind": "people",
       "blurb": "Back to Black. Strings, backbeat, a voice that writes its own room.",
+      "story": "/stories/02-amy-winehouse/",
       "nav": true
     },
     {
@@ -1048,8 +1081,8 @@
       "nav": true
     }
   ],
-  "v": 7,
-  "cacheBust": 7,
+  "v": 9,
+  "cacheBust": 9,
   "pixel": false,
   "redditCrosspost": false,
   "features": {

@@ -1,6 +1,234 @@
 (function () {
   'use strict';
 
+  // factory.js owns the shell. When it is on the page, this file only mounts
+  // story links from site.json (rail.stories and nest.story).
+  function mountRoomStories() {
+    var script = document.querySelector('script[data-site]');
+    var url = (script && script.getAttribute('data-site')) || 'site.json';
+
+    function storyHref(value) {
+      var s = String(value || '').trim();
+      if (!/^\/stories\/(?:[a-z0-9-]+\/)?$/.test(s)) return '';
+      return s;
+    }
+
+    function nestSlugFromLocation() {
+      var parts = String(location.pathname || '').split('/').filter(Boolean);
+      if (parts.length !== 1) return '';
+      var slug = parts[0].replace(/\.html$/i, '').toLowerCase();
+      if (!slug || slug === 'index') return '';
+      return slug;
+    }
+
+    function ensureCss() {
+      if (document.getElementById('room-stories-css')) return;
+      var st = document.createElement('style');
+      st.id = 'room-stories-css';
+      st.textContent =
+        '.news-item-stories{display:block;padding:1rem 1.4rem;border-bottom:1px solid rgba(255,255,255,0.06);}' +
+        '.news-item-stories .news-item-story{display:block;margin-top:0.55rem;font-size:0.92rem;font-weight:600;line-height:1.4;color:var(--text,#f0ebe6);text-decoration:none;}' +
+        '.news-item-stories .news-item-story:hover{text-decoration:underline;}' +
+        '.nest-chrome-story{display:block;}' +
+        '.story-streamer{display:flex;align-items:center;gap:0.35rem;margin-top:0.2rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border,#2e2834);background:var(--surface,#1c1822);}' +
+        '.story-streamer-link{display:flex;align-items:baseline;gap:0.55rem;min-width:0;flex:1;color:var(--text,#f0ebe6);text-decoration:none;font-size:0.86rem;line-height:1.3;}' +
+        '.story-streamer-label{flex:none;font-size:0.68rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent,#c4a574);}' +
+        '.story-streamer-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}' +
+        '.story-streamer-x{flex:none;width:1.7rem;height:1.7rem;padding:0;border:0;border-radius:999px;background:transparent;color:var(--text-muted,#9a9088);font-size:1.15rem;line-height:1;cursor:pointer;}' +
+        '.story-streamer-x:hover,.story-streamer-x:focus-visible{color:var(--text,#f0ebe6);}' +
+        '@media (max-width:900px){.story-streamer{padding-left:3.8rem;}}';
+      document.head.appendChild(st);
+    }
+
+    function buildCard(items) {
+      var card = document.createElement('nav');
+      card.className = 'news-item news-item-stories';
+      card.setAttribute('aria-label', 'Featured Stories');
+      var tag = document.createElement('div');
+      tag.className = 'news-item-tag';
+      tag.textContent = 'Featured Stories';
+      card.appendChild(tag);
+      items.forEach(function (item) {
+        var a = document.createElement('a');
+        a.className = 'news-item-story';
+        a.setAttribute('href', item.url);
+        a.textContent = item.headline;
+        card.appendChild(a);
+      });
+      var all = document.createElement('a');
+      all.className = 'news-item-story';
+      all.setAttribute('href', '/stories/');
+      all.textContent = 'All stories';
+      card.appendChild(all);
+      return card;
+    }
+
+    fetch(url, { credentials: 'omit' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Could not load ' + url);
+        return res.json();
+      })
+      .then(function (site) {
+        var rail = (site && site.rail) || {};
+        var items = [];
+        var list = Array.isArray(rail.stories) ? rail.stories : [];
+        for (var i = 0; i < list.length; i++) {
+          var row = list[i];
+          if (!row || !row.headline) continue;
+          var href = storyHref(row.url);
+          if (!href || href === '/stories/') continue;
+          items.push({ headline: String(row.headline), url: href });
+        }
+        var storyBySlug = {};
+        var nests = (site && site.nests) || [];
+        for (var n = 0; n < nests.length; n++) {
+          var nest = nests[n];
+          if (!nest || !nest.slug) continue;
+          var nestHref = storyHref(nest.story);
+          if (!nestHref || nestHref === '/stories/') continue;
+          storyBySlug[String(nest.slug).toLowerCase()] = nestHref;
+        }
+        var rawStreamer = (site && site.streamer) || {};
+        var streamer = null;
+        if (rawStreamer.enabled) {
+          var streamHref = storyHref(rawStreamer.url);
+          var streamText = String(rawStreamer.text || '').trim();
+          if (streamHref && streamText) {
+            streamer = {
+              label: String(rawStreamer.label || 'New story').trim() || 'New story',
+              text: streamText,
+              url: streamHref
+            };
+          }
+        }
+        var DISMISS_KEY = '27chat.streamerDismissed';
+        function dismissedMap() {
+          try {
+            var raw = localStorage.getItem(DISMISS_KEY);
+            var map = raw ? JSON.parse(raw) : {};
+            return map && typeof map === 'object' ? map : {};
+          } catch (e) { return {}; }
+        }
+        function isDismissed(storyUrl) {
+          return !!dismissedMap()[storyUrl];
+        }
+        function dismissStreamer(storyUrl) {
+          try {
+            var map = dismissedMap();
+            map[storyUrl] = 1;
+            localStorage.setItem(DISMISS_KEY, JSON.stringify(map));
+          } catch (e) {}
+        }
+        function onHomeFeed() {
+          if (nestSlugFromLocation()) return false;
+          var home = document.getElementById('page-thoughts');
+          return !!(home && home.classList.contains('active'));
+        }
+        ensureCss();
+
+        function paintRail() {
+          var feed = document.getElementById('news-feed');
+          if (!feed) return;
+          var onNest = !!nestSlugFromLocation();
+          var card = feed.querySelector(':scope > .news-item-stories');
+          if (onNest || !items.length) {
+            if (card) card.remove();
+            return;
+          }
+          if (!card) card = buildCard(items);
+          if (feed.firstChild !== card) feed.insertBefore(card, feed.firstChild);
+        }
+
+        function paintNest() {
+          var bar = document.getElementById('nest-chrome');
+          if (!bar || bar.hidden) return;
+          var href = storyBySlug[nestSlugFromLocation()] || '';
+          var link = bar.querySelector('.nest-chrome-story');
+          if (!href) {
+            if (link) link.remove();
+            return;
+          }
+          if (link && link.getAttribute('href') === href) return;
+          if (link) link.remove();
+          var a = document.createElement('a');
+          a.className = 'nest-chrome-home nest-chrome-story';
+          a.setAttribute('href', href);
+          a.textContent = 'Read the story';
+          var label = bar.querySelector('.nest-chrome-label');
+          if (label) label.insertAdjacentElement('afterend', a);
+          else bar.insertAdjacentElement('afterbegin', a);
+        }
+
+        function paintStreamer() {
+          var page = document.getElementById('page-thoughts');
+          if (!page) return;
+          var existing = document.getElementById('story-streamer');
+          var show = !!(streamer && onHomeFeed() && !isDismissed(streamer.url));
+          if (!show) {
+            if (existing) existing.remove();
+            return;
+          }
+          if (existing && existing.getAttribute('data-url') === streamer.url) {
+            if (page.firstChild !== existing) page.insertBefore(existing, page.firstChild);
+            return;
+          }
+          if (existing) existing.remove();
+          var bar = document.createElement('div');
+          bar.id = 'story-streamer';
+          bar.className = 'story-streamer';
+          bar.setAttribute('data-url', streamer.url);
+          var link = document.createElement('a');
+          link.className = 'story-streamer-link';
+          link.setAttribute('href', streamer.url);
+          var label = document.createElement('span');
+          label.className = 'story-streamer-label';
+          label.textContent = streamer.label;
+          var text = document.createElement('span');
+          text.className = 'story-streamer-text';
+          text.textContent = streamer.text;
+          link.appendChild(label);
+          link.appendChild(text);
+          var dismiss = document.createElement('button');
+          dismiss.type = 'button';
+          dismiss.className = 'story-streamer-x';
+          dismiss.setAttribute('aria-label', 'Dismiss');
+          dismiss.textContent = '\u00d7';
+          dismiss.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismissStreamer(streamer.url);
+            paint();
+          });
+          bar.appendChild(link);
+          bar.appendChild(dismiss);
+          page.insertBefore(bar, page.firstChild);
+        }
+
+        function paint() {
+          paintRail();
+          paintNest();
+          paintStreamer();
+        }
+
+        paint();
+        var obs = new MutationObserver(paint);
+        var feed = document.getElementById('news-feed');
+        var page = document.getElementById('page-thoughts');
+        if (feed) obs.observe(feed, { childList: true });
+        if (page) obs.observe(page, { childList: true, subtree: true });
+        window.addEventListener('popstate', paint);
+        window.addEventListener('hashchange', paint);
+      })
+      .catch(function (err) {
+        console.warn('room stories', err);
+      });
+  }
+
+  if (document.querySelector('script[src*="factory.js"]')) {
+    mountRoomStories();
+    return;
+  }
+
   const MOBILE_NAV_MQ = 900;
   const LS_USER = '27chat.user';
   const LS_LIKES = '27chat.likes';
