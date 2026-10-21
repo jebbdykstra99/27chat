@@ -9,6 +9,8 @@
     (function () {
       var path = location.pathname || '/';
       if (path.charAt(0) !== '/') path = '/' + path;
+      var bare = path.replace(/\/+$/, '') || '/';
+      if (bare === '/robots.txt' || bare === '/sitemap-stories.xml') return;
       try { sessionStorage.setItem('subx.restorePath', path + (location.search || '') + (location.hash || '')); } catch (e) {}
       location.replace('/' + (location.search || '') + (location.hash || ''));
     })();
