@@ -19,6 +19,7 @@ Requires Pillow. From the repo root:
     python3 scripts/make_story_card.py 02
     python3 scripts/make_story_card.py 03
     python3 scripts/make_story_card.py 04
+    python3 scripts/make_story_card.py 05
 """
 
 from __future__ import annotations
@@ -41,8 +42,8 @@ HEIGHT = 630
 FOOTER = "27chat \u2014 The work didn't stop."
 
 # Card copy is the cleared line spec for each story. Story 01's title is
-# wrapped; the words and their order are unchanged. Stories 02, 03 and 04 use
-# the single large line and the third line from their META card specs.
+# wrapped; the words and their order are unchanged. Stories 02, 03, 04 and 05
+# use the single large line and the third line from their META card specs.
 STORIES = {
     "01": {
         "out": ROOT / "stories" / "01-jim-morrison-paris" / "card.png",
@@ -72,12 +73,22 @@ STORIES = {
         "title_lines": ("Robert Johnson's Work",),
         "dateline": "San Antonio 1936 \u00b7 Dallas 1937 \u00b7 29 Songs",
     },
+    "05": {
+        "out": ROOT / "stories" / "05-kurt-cobain" / "card.png",
+        "kicker": "STORY 05",
+        "title": "Kurt Cobain's Work",
+        "title_lines": ("Kurt Cobain's Work",),
+        "dateline": "Bleach \u00b7 Nevermind \u00b7 In Utero \u00b7 Unplugged",
+    },
 }
 
 assert STORIES["01"]["dateline"] == "Paris, 1971 \u00b7 P\u00e8re Lachaise"
 assert STORIES["02"]["dateline"] == "Frank \u00b7 Back to Black \u00b7 Lioness"
 assert STORIES["03"]["dateline"] == "London \u00b7 Monterey \u00b7 Electric Lady"
 assert STORIES["04"]["dateline"] == "San Antonio 1936 \u00b7 Dallas 1937 \u00b7 29 Songs"
+assert STORIES["05"]["dateline"] == "Bleach \u00b7 Nevermind \u00b7 In Utero \u00b7 Unplugged"
+assert STORIES["05"]["kicker"] == "STORY 05"
+assert STORIES["05"]["title"] == "Kurt Cobain's Work"
 assert FOOTER == "27chat \u2014 The work didn't stop."
 assert "\u2019" not in FOOTER
 for spec in STORIES.values():
