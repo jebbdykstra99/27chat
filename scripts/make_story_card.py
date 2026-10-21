@@ -17,6 +17,7 @@ Requires Pillow. From the repo root:
 
     python3 scripts/make_story_card.py
     python3 scripts/make_story_card.py 02
+    python3 scripts/make_story_card.py 03
 """
 
 from __future__ import annotations
@@ -39,8 +40,8 @@ HEIGHT = 630
 FOOTER = "27chat \u2014 The work didn't stop."
 
 # Card copy is the cleared line spec for each story. Story 01's title is
-# wrapped; the words and their order are unchanged. Story 02 uses the single
-# large line and the third line from its META card spec.
+# wrapped; the words and their order are unchanged. Stories 02 and 03 use
+# the single large line and the third line from their META card specs.
 STORIES = {
     "01": {
         "out": ROOT / "stories" / "01-jim-morrison-paris" / "card.png",
@@ -56,10 +57,18 @@ STORIES = {
         "title_lines": ("Amy Winehouse's Music",),
         "dateline": "Frank \u00b7 Back to Black \u00b7 Lioness",
     },
+    "03": {
+        "out": ROOT / "stories" / "03-jimi-hendrix" / "card.png",
+        "kicker": "STORY 03",
+        "title": "Jimi Hendrix's Work",
+        "title_lines": ("Jimi Hendrix's Work",),
+        "dateline": "London \u00b7 Monterey \u00b7 Electric Lady",
+    },
 }
 
 assert STORIES["01"]["dateline"] == "Paris, 1971 \u00b7 P\u00e8re Lachaise"
 assert STORIES["02"]["dateline"] == "Frank \u00b7 Back to Black \u00b7 Lioness"
+assert STORIES["03"]["dateline"] == "London \u00b7 Monterey \u00b7 Electric Lady"
 assert FOOTER == "27chat \u2014 The work didn't stop."
 assert "\u2019" not in FOOTER
 for spec in STORIES.values():
