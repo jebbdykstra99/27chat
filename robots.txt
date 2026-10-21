@@ -5,6 +5,8 @@
 
 User-agent: *
 Allow: /stories/
+Allow: /styles.css
+Allow: /favicon.svg
 Disallow: /
 
 # AI answer/search bots may reach /stories/ only.
