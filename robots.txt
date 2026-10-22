@@ -1,6 +1,6 @@
 # 27chat robots.txt
 # Story pages under /stories/ may be indexed (approved 2026-10-21).
-# Everything else stays out of search. Accounts are not open.
+# Everything else stays out of search.
 # Do not scrape or use any content for AI training (named bots below stay blocked).
 
 User-agent: *
