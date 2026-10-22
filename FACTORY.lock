@@ -1,10 +1,10 @@
 {
   "factory": "jebbdykstra99/subx-factory",
-  "version": "v1.1.0",
+  "version": "v1.0.1+nr",
   "room": "27chat",
   "siteId": "27chat",
   "files": {
-    "factory.js": "5db3afa908549bd776b862b44582f192bbeafaa35cf80941b5243015a38ec734",
+    "factory.js": "a90e69ba13409b24ca19ff6be48c14e727ecc0c2f733fe44c4030539f9e9079b",
     "styles.css": "71f993c10af261b634c238be982ed0eb6a8d1ba1870435ab3702822fd7e093e9"
   },
   "keepFiles": [],
