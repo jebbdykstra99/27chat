@@ -1455,3 +1455,11 @@ body.legal-page {
   .stories-viewer { padding: 0; }
   .stories-viewer-card { height: calc(100vh - 2.15rem); border-radius: 0; }
 }
+
+/* Steward attribution pill (ported from new template; gpchat styles.css) */
+.post-steward-pill {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+  border: 1px solid currentColor; border-radius: 999px;
+  padding: 0.05rem 0.45rem; line-height: 1.5;
+}

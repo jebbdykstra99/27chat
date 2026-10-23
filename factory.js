@@ -7,7 +7,6 @@
   const MOBILE_NAV_MQ = 900;
   const LS_USER = 'subx.user';
   const LS_LIKES = 'subx.likes';
-  // One-time migration from the per-room keys older stamps used (<room>.user / <room>.likes).
   try {
     if (!localStorage.getItem(LS_USER) || !localStorage.getItem(LS_LIKES)) {
       for (var lsI = 0; lsI < localStorage.length; lsI++) {
@@ -19,13 +18,11 @@
   } catch (eLs) {}
   const SITE_JSON_URL = (document.currentScript && document.currentScript.getAttribute('data-site')) || 'site.json';
 
-  let SITE_ID = '';  // set from site.json siteId in boot()
+  let SITE_ID = '';
   let site = null;
-  const LS_TOPIC_FOLLOWS = 'subx.topicFollows';
   let dmSendInFlight = false;
   let focusedTopicId = '';
   let watchlistPickerOpen = false;
-  let watchlistQuery = '';
   let COLORS = ['#0b1c2c', '#1b6b73', '#c0362c', '#2a4a62', '#8a3b32', '#345c6e'];
   let TRENDS = [];
   let PLACES = [];
@@ -39,7 +36,6 @@
   var memberNestsUnsub = null;
   var nestAddSlugDirty = false;
 
-  // Path segments that must never be a nest. Existing nest slugs are checked live.
   var NEST_RESERVED = {
     '': 1, home: 1, feed: 1, thoughts: 1, following: 1, explore: 1,
     notifications: 1, chat: 1, profile: 1, news: 1, about: 1, terms: 1,
@@ -96,6 +92,51 @@
   const ADMIN_UID = 'o774wL9hUVSi19EkDCgLqQomP8i2';
   const DM_TEXT_MAX = 1000;
 
+  var PLUGIN = {};
+  var CORE = {
+    closeSocialOverlays: closeSocialOverlays,
+    collectTopicIds: collectTopicIds,
+    composeErr: composeErr,
+    escapeHtml: escapeHtml,
+    featureOn: featureOn,
+    findPost: findPost,
+    highlightDeepPost: highlightDeepPost,
+    isLiveUser: isLiveUser,
+    liveUid: liveUid,
+    loadJSON: loadJSON,
+    notifWhen: notifWhen,
+    openAuth: openAuth,
+    railCfg: railCfg,
+    railNwsSlots: railNwsSlots,
+    refreshPorchUi: refreshPorchUi,
+    renderFeed: renderFeed,
+    renderPost: renderPost,
+    renderReports: renderReports,
+    repliesFor: repliesFor,
+    saveJSON: saveJSON,
+    sendNotif: sendNotif,
+    toast: toast,
+    topLevelPosts: topLevelPosts,
+    tsMillis: tsMillis,
+    get ADMIN_UID() { return ADMIN_UID; },
+    get HIDE_REASONS() { return HIDE_REASONS; },
+    get SITE_ID() { return SITE_ID; },
+    get currentNest() { return currentNest; },
+    get fbDb() { return fbDb; },
+    get focusedTopicId() { return focusedTopicId; },
+    get hiddenIds() { return hiddenIds; },
+    get liveError() { return liveError; },
+    get liveReady() { return liveReady; },
+    get reportItems() { return reportItems; },
+    get site() { return site; },
+    get watchlistPickerOpen() { return watchlistPickerOpen; },
+    set watchlistPickerOpen(v) { watchlistPickerOpen = v; }
+  };
+  (window.__subxPlugins || []).forEach(function (install) {
+    var api = install(CORE) || {};
+    Object.keys(api).forEach(function (k) { PLUGIN[k] = api[k]; });
+  });
+
   const FB_WEB_CONFIG_URL = 'https://subx-skins.web.app/firebase-web-config.json';
 
   function initFirebaseFromHostedConfig() {
@@ -150,23 +191,142 @@
     else fbReadyPromise.then(go);
   }
 
-  // ===== PREVIEW-LIFT (guards/privacy/steward) =====
-  // Port this block plus the call sites named in the PR. A room joins guardedSite
-  // only after its factory.js carries guardedPostWrite + the DM lastMsgAt batch.
   var HANDLE_EXACT = { mod: 1, mods: 1, staff: 1, support: 1, steward: 1, system: 1, root: 1, team: 1 };
   var guardState = { rate: null, unsub: null, lastPostMs: 0, lastMsgMs: 0, sending: false };
   var guardTick = null;
   var reportItems = [];
   var reportsUnsub = null;
   var reportedMem = {};
+  var hiddenIds = {};
+  var hidesUnsub = null;
+  var HIDE_REASONS = { ncii: 1, copyright: 1, violent_offensive: 1, hate: 1, impersonation: 1, csam: 1 };
   var previewLiftWired = false;
 
   function isAdminUser() {
     return liveUid() === ADMIN_UID;
   }
+  function isPostHidden(p) {
+    return !!(p && (hiddenIds[p.id] || (p.parentId && hiddenIds[p.parentId]) || (p.authorUid && hiddenIds['uid:' + p.authorUid])));
+  }
+  function isStoryHidden(s) {
+    return !!(s && (hiddenIds['story:' + s.id] || hiddenIds[s.id] || (s.authorUid && hiddenIds['uid:' + s.authorUid])));
+  }
+  function listenHides() {
+    if (hidesUnsub) { hidesUnsub(); hidesUnsub = null; }
+    if (!fbDb || !SITE_ID) return;
+    hidesUnsub = fbDb.collection('hides').where('siteId', '==', SITE_ID).onSnapshot(function (snap) {
+      var next = {};
+      snap.forEach(function (d) { d = d.data() || {}; if (d.postId) next[d.postId] = true; });
+      hiddenIds = next;
+      renderFeed();
+      if (typeof renderStoriesTray === 'function') renderStoriesTray();
+      if (currentUser) syncProfile();
+      renderNotifs();
+      renderReports();
+    }, function () {});
+  }
+  function pickReportReason(done) {
+    if (pickReportReason._open) return;
+    pickReportReason._open = true;
+    var ov = document.createElement('div'), box = document.createElement('div'), h = document.createElement('h2'), note = document.createElement('p'), more = document.createElement('p'), a = document.createElement('a');
+    ov.className = 'conv-modal-overlay open';
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-modal', 'true');
+    ov.setAttribute('aria-label', 'Report');
+    box.className = 'conv-modal';
+    h.textContent = 'Report';
+    note.className = 'conv-modal-note';
+    note.textContent = 'Why are you reporting this?';
+    box.appendChild(h);
+    box.appendChild(note);
+    function onKey(e) { if (e && e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); close(null); } }
+    function close(reason) {
+      if (!pickReportReason._open) return;
+      pickReportReason._open = false;
+      document.removeEventListener('keydown', onKey, true);
+      if (ov.parentNode) ov.parentNode.removeChild(ov);
+      if (done) done(reason || null);
+    }
+    function btn(label, cls, reason) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls;
+      if (reason) b.setAttribute('data-reason', reason);
+      b.textContent = label;
+      b.addEventListener('click', function () { close(reason); });
+      box.appendChild(b);
+      return b;
+    }
+    var opts = [
+      { code: 'ncii', label: 'Intimate image without consent' },
+      { code: 'copyright', label: 'Copyright or trademark (DMCA)' },
+      { code: 'violent_offensive', label: 'Violent or graphic image' },
+      { code: 'hate', label: 'Hateful or racist image' },
+      { code: 'other', label: 'Other abuse or rule-breaking' }
+    ];
+    var first = null;
+    opts.forEach(function (o, i) { var b = btn(o.label, 'conv-modal-submit', o.code); if (!i) first = b; });
+    btn('Cancel', 'conv-guest-btn', null);
+    more.className = 'conv-modal-note';
+    a.href = 'report.html';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = 'How reports work, and how to send a removal request';
+    more.appendChild(a);
+    box.appendChild(more);
+    ov.addEventListener('click', function (e) { if (e && e.target === ov) close(null); });
+    document.addEventListener('keydown', onKey, true);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    try { if (first) first.focus(); } catch (e) {}
+  }
+  function commitAutoHideReport(postId, targetUid, storyId, reason, fallbackAdd) {
+    var me = liveUid(), rRef = fbDb.collection('reports').doc(), ts = firebase.firestore.FieldValue.serverTimestamp();
+    var rDoc = { siteId: SITE_ID, postId: postId, targetUid: targetUid || '', reporterUid: me, reason: reason, status: 'open', createdAt: ts };
+    if (storyId) rDoc.storyId = storyId;
+    hiddenIds[postId] = true;
+    renderFeed();
+    if (typeof renderStoriesTray === 'function') renderStoriesTray();
+    var b = fbDb.batch();
+    b.set(rRef, rDoc);
+    b.set(fbDb.collection('hides').doc(SITE_ID + '_' + postId), { siteId: SITE_ID, postId: postId, reportId: rRef.id, reporterUid: me, createdAt: ts });
+    b.set(fbDb.collection('rateLimits').doc(me), { lastHideAt: ts }, { merge: true });
+    return b.commit().catch(function (e) {
+      if (isPermDenied(e) && fallbackAdd) return fallbackAdd();
+      throw e;
+    });
+  }
+  var ACC_CLOSED = 'Accounts are not open yet. You can read the room as a guest.';
+  function accountsOpen() {
+    return !(site && (site.accountsOpen === false || site.accounts === 'closed'));
+  }
+  function applyAccountsGate() {
+    var d = document.documentElement, o = accountsOpen(), stew = false, n = document.getElementById('cv-accounts-closed');
+    try { stew = localStorage.getItem('subx.steward') === '1'; } catch (e) {}
+    d.classList.toggle('acc-closed', !o);
+    d.classList.toggle('acc-stew', stew);
+    if (n) n.style.display = o ? 'none' : '';
+    if (o || document.getElementById('acc-gate-css')) return;
+    var g = document.getElementById('cv-google-age'), c = '.acc-closed:not(.acc-stew) ';
+    g = g && g.closest('label');
+    if (g) g.classList.add('acc-g');
+    var st = document.createElement('style');
+    st.id = 'acc-gate-css';
+    st.textContent = '.acc-closed [data-tab="register"],.acc-closed #cv-panel-register,.acc-closed #cv-goto-register,.acc-closed #cv-goto-join,' +
+      c + '#cv-google-login,' + c + '.acc-g,' + c + '[for=cv-google-dob],' + c + '#cv-panel-login .conv-modal-divider{display:none!important}';
+    document.head.appendChild(st);
+    var p = document.getElementById('cv-panel-login'), t = document.getElementById('auth-title');
+    if (t) t.textContent = 'Sign in to ' + (site && site.name || 'this room');
+    if (n || !p) return;
+    n = document.createElement('p');
+    n.className = 'conv-modal-note';
+    n.id = 'cv-accounts-closed';
+    n.textContent = ACC_CLOSED;
+    p.insertBefore(n, p.firstChild);
+  }
   function siteMinAge() {
     var n = parseInt(site && site.minAge, 10);
-    if (!isFinite(n) || n < 1) return 13;
+    if (!isFinite(n) || n < 1) return 18;
     return n;
   }
   function ageGateMessage() {
@@ -263,6 +423,7 @@
   }
   function ensurePublicProfile(user, typedName, extra) {
     if (!fbDb || !user) return Promise.resolve();
+    if (!accountsOpen() && user.uid !== ADMIN_UID) return Promise.reject(new Error(ACC_CLOSED));
     var typed = String(typedName || '').trim();
     if (typed && !nameOk(typed)) return Promise.reject(new Error('That display name is reserved.'));
     var idn = memberIdentity(user, typed);
@@ -290,21 +451,7 @@
     var st = document.createElement('style');
     st.id = 'preview-lift-css';
     st.textContent =
-      '.name-prefix-nudge{margin:0.7rem 1rem 0;padding:0.75rem 0.9rem;display:flex;gap:0.6rem;align-items:flex-start;' +
-        'background:var(--surface,#111);color:var(--text,#f4f4f4);border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;font-size:0.86rem;}' +
-      '.name-prefix-nudge[hidden],.name-prompt[hidden]{display:none!important;}' +
-      '.name-prefix-nudge-copy{flex:1;}' +
-      '.name-prefix-nudge-link,.name-prefix-nudge-x{background:transparent;border:1px solid var(--border,rgba(255,255,255,0.18));color:inherit;border-radius:8px;cursor:pointer;}' +
-      '.name-prefix-nudge-link{margin-left:0.35rem;padding:0.15rem 0.5rem;font:inherit;font-weight:600;}' +
-      '.name-prefix-nudge-x{width:1.7rem;height:1.7rem;}' +
-      '.name-prompt{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:1rem;}' +
-      '.name-prompt-card{background:var(--surface,#111);color:var(--text,#f4f4f4);border-radius:12px;padding:1rem;width:min(22rem,100%);}' +
-      '.name-prompt-card input{width:100%;margin:0.5rem 0;padding:0.45rem 0.6rem;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;}' +
-      '.name-prompt-err{min-height:1.1rem;color:var(--accent,#e10600);font-size:0.8rem;}' +
-      '.name-prompt-actions{display:flex;justify-content:flex-end;gap:0.5rem;margin-top:0.4rem;}' +
-      '.post-menu{position:relative;margin-left:auto;}' +
-      '.post-menu-pop{position:absolute;right:0;top:100%;z-index:5;background:var(--surface,#111);border:1px solid var(--border,#333);border-radius:8px;padding:0.25rem;min-width:8rem;}' +
-      '#nav-reports{cursor:pointer;width:100%;background:none;border:0;font:inherit;text-align:left;}';
+      '.name-prefix-nudge{margin:0.7rem 1rem 0;padding:0.75rem 0.9rem;display:flex;gap:0.6rem;align-items:flex-start;background:var(--surface,#111);color:var(--text,#f4f4f4);border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;font-size:0.86rem;}.name-prefix-nudge[hidden],.name-prompt[hidden]{display:none!important;}.name-prefix-nudge-copy{flex:1;}.name-prefix-nudge-link,.name-prefix-nudge-x{background:transparent;border:1px solid var(--border,rgba(255,255,255,0.18));color:inherit;border-radius:8px;cursor:pointer;}.name-prefix-nudge-link{margin-left:0.35rem;padding:0.15rem 0.5rem;font:inherit;font-weight:600;}.name-prefix-nudge-x{width:1.7rem;height:1.7rem;}.name-prompt{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:1rem;}.name-prompt-card{background:var(--surface,#111);color:var(--text,#f4f4f4);border-radius:12px;padding:1rem;width:min(22rem,100%);}.name-prompt-card input{width:100%;margin:0.5rem 0;padding:0.45rem 0.6rem;border-radius:8px;border:1px solid var(--border,#333);background:transparent;color:inherit;}.name-prompt-err{min-height:1.1rem;color:var(--accent,#e10600);font-size:0.8rem;}.name-prompt-actions{display:flex;justify-content:flex-end;gap:0.5rem;margin-top:0.4rem;}.post-menu{position:relative;margin-left:auto;}.post-menu-pop{position:absolute;right:0;top:100%;z-index:5;background:var(--surface,#111);border:1px solid var(--border,#333);border-radius:8px;padding:0.25rem;min-width:8rem;}#nav-reports{cursor:pointer;width:100%;background:none;border:0;font:inherit;text-align:left;}';
     document.head.appendChild(st);
   }
   function showEmailPrefixNudge(uid) {
@@ -339,14 +486,7 @@
       el.id = 'name-prompt';
       el.className = 'name-prompt';
       el.innerHTML =
-        '<div class="name-prompt-card" role="dialog" aria-label="Pick a display name">' +
-          '<p>Pick a display name</p>' +
-          '<input id="name-prompt-input" maxlength="50" autocomplete="nickname" placeholder="Your name">' +
-          '<div class="name-prompt-err" id="name-prompt-err"></div>' +
-          '<div class="name-prompt-actions">' +
-            '<button type="button" id="name-prompt-cancel">Cancel</button>' +
-            '<button type="button" id="name-prompt-save">Save</button>' +
-          '</div></div>';
+        '<div class="name-prompt-card" role="dialog" aria-label="Pick a display name"><p>Pick a display name</p><input id="name-prompt-input" maxlength="50" autocomplete="nickname" placeholder="Your name"><div class="name-prompt-err" id="name-prompt-err"></div><div class="name-prompt-actions"><button type="button" id="name-prompt-cancel">Cancel</button><button type="button" id="name-prompt-save">Save</button></div></div>';
       document.body.appendChild(el);
     }
     var err = document.getElementById('name-prompt-err');
@@ -521,6 +661,7 @@
     return '';
   }
   function guardedPostWrite(doc) {
+    if (!accountsOpen() && doc.authorUid !== ADMIN_UID) return Promise.reject(new Error(ACC_CLOSED));
     var msg = postGuardMessage(doc);
     if (msg) return Promise.reject(new Error(msg));
     if (guardState.sending) return Promise.reject(new Error('Post already sending.'));
@@ -611,9 +752,10 @@
       sessionStorage.setItem(key, JSON.stringify(map));
     } catch (e) {}
   }
-  function writeReportAlert(post, me) {
+  function writeReportAlert(post, me, reason) {
     if (!me || me === ADMIN_UID || !fbDb || !post) return;
-    var snippet = String(post.text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    var hide = HIDE_REASONS[reason] || isPostHidden(post);
+    var snippet = hide ? ('[' + (reason || 'hidden') + ' · auto-hidden]') : String(post.text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
     fbDb.collection('users').doc(ADMIN_UID).collection('notifications').add({
       toUid: ADMIN_UID,
       fromUid: me,
@@ -632,6 +774,7 @@
     return n;
   }
   function syncReportsEntry() {
+    syncMyReports();
     var nav = document.querySelector('#sidebar nav ul');
     var link = document.getElementById('nav-reports');
     var admin = isLiveUser() && liveUid() === ADMIN_UID;
@@ -689,9 +832,7 @@
     el.id = 'reports-overlay';
     el.className = 'notif-overlay';
     el.innerHTML =
-      '<button class="view-back" id="reports-back" type="button">Back</button>' +
-      '<div class="notif-header"><div class="notif-title">Reports</div></div>' +
-      '<div class="notif-list" id="reports-list"></div>';
+      '<button class="view-back" id="reports-back" type="button">Back</button><div class="notif-header"><div class="notif-title">Reports</div></div><div class="notif-list" id="reports-list"></div>';
     document.body.appendChild(el);
     return el;
   }
@@ -717,20 +858,22 @@
   function renderReports() {
     var el = document.getElementById('reports-list');
     if (!el) return;
-    var rows = reportItems.filter(function (r) { return r.status !== 'dismissed'; }).slice(0, 50);
+    var rows = reportItems.filter(function (r) { return r.status !== 'dismissed' && r.status !== 'actioned'; }).slice(0, 50);
     if (!rows.length) {
       el.innerHTML = '<div class="soon-panel"><strong>No open reports.</strong></div>';
       return;
     }
     el.innerHTML = rows.map(function (r) {
-      var post = findPost(r.postId);
-      var snippet = (post && post.text) ? String(post.text).replace(/\s+/g, ' ').trim().slice(0, 180) : '(post unavailable)';
+      var isHid = !!(hiddenIds[r.postId] || HIDE_REASONS[r.reason]);
+      var post = isHid ? null : findPost(r.postId);
+      var snippet = isHid ? ('[Hidden — ' + (r.reason || 'reported') + ' · ' + r.postId + ']') :
+        ((post && post.text) ? String(post.text).replace(/\s+/g, ' ').trim().slice(0, 180) : '(post not loaded)');
       var count = reporterCount(r.postId);
-      return '<div class="notif-item">' +
+      return '<div class="notif-item"' + (isHid ? ' style="opacity:0.65"' : '') + '>' +
         '<p>' + escapeHtml(snippet) + '</p>' +
-        '<p>' + count + ' reporter' + (count === 1 ? '' : 's') + '</p>' +
+        '<p>' + count + ' reporter' + (count === 1 ? '' : 's') + (r.reason ? ' · ' + escapeHtml(r.reason) : '') + '</p>' +
         '<button type="button" class="post-action" data-report-remove="' + escapeHtml(r.postId) + '">Remove post</button> ' +
-        '<button type="button" class="post-action" data-report-dismiss="' + escapeHtml(r.id) + '">Dismiss</button>' +
+        reportTriage(r) +
         '</div>';
     }).join('');
   }
@@ -739,6 +882,13 @@
     fbDb.collection('reports').doc(id).update({ status: 'dismissed' }).catch(function (e) {
       composeErr(guardPublicErr(e, 'Could not dismiss that report.'));
     });
+  }
+  function reportTriage(r) { // factory-reports.js
+    if (PLUGIN.reportTriage) return PLUGIN.reportTriage.apply(null, arguments);
+    return '<button type="button" class="post-action" data-report-dismiss="' + escapeHtml(r.id) + '">Dismiss</button>';
+  }
+  function syncMyReports() { // factory-reports.js
+    if (PLUGIN.syncMyReports) return PLUGIN.syncMyReports.apply(null, arguments);
   }
   function stopPreviewLift() {
     if (guardState.unsub) { guardState.unsub(); guardState.unsub = null; }
@@ -803,17 +953,11 @@
       }
     });
   }
-  // ===== END PREVIEW-LIFT (guards/privacy/steward) =====
 
-  // ===== SUBX FACTORY: site.json-driven features + skin (one identical factory.js for every room) =====
-  // site.json "features": { watchlist, following, notifs, topicFollow, sessionSeeds } (all default false).
-  // DMs stay on site.json "dms" (existing). F1 rail stays on rail.kind 'f1-calendar'. Age: site.json "minAge".
   function featureOn(name) {
     var f = site && site.features;
     return !!(f && f[name] === true);
   }
-  // site.json "skin": { bioDefault, avatarInitials, profileEmpty, guestHandle, exploreEmpty, seatTag, storiesPlaceholder,
-  //   regNamePlaceholder, taglineH1:"true", keepBrandTitle:"true" } (strings). Room copy lives in site.json, never here.
   function skin(key, fallback) {
     var s = site && site.skin;
     var v = s && typeof s[key] === 'string' ? s[key] : '';
@@ -833,111 +977,20 @@
     try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* private mode */ }
   }
 
-  function topicFollowsStoreKey() {
-    return LS_TOPIC_FOLLOWS + '.' + (SITE_ID || 'site');
+  function renderFollowBtn() { // factory-gp.js
+    if (PLUGIN.renderFollowBtn) return PLUGIN.renderFollowBtn.apply(null, arguments);
+    return '';
   }
 
-  function loadTopicFollows() {
-    var raw = loadJSON(topicFollowsStoreKey(), {});
-    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  function syncTopicFollowButtons() { // factory-gp.js
+    if (PLUGIN.syncTopicFollowButtons) return PLUGIN.syncTopicFollowButtons.apply(null, arguments);
   }
 
-  function topicFollowSlug(s) {
-    return String(s || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80);
-  }
-
-  function cardTopicKey(card) {
-    if (!card) return 'topic';
-    var explicit = card.followId || card.topic;
-    if (explicit) {
-      var fromExplicit = topicFollowSlug(explicit);
-      if (fromExplicit) return fromExplicit;
-    }
-    var tag = topicFollowSlug(card.tag);
-    var head = topicFollowSlug(card.headline);
-    if (tag && head) return (tag + '-' + head).slice(0, 80);
-    return tag || head || 'topic';
-  }
-
-  function isTopicFollowed(key) {
-    return !!(key && loadTopicFollows()[key]);
-  }
-
-  function setTopicFollowed(key, on) {
-    if (!key) return;
-    var map = loadTopicFollows();
-    if (on) map[key] = true;
-    else delete map[key];
-    saveJSON(topicFollowsStoreKey(), map);
-  }
-
-  function topicFollowLabel(card) {
-    return String((card && (card.tag || card.headline)) || 'topic');
-  }
-
-  function followIconSvg(on) {
-    if (on) {
-      return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
-    }
-    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-  }
-
-  function renderFollowBtn(card) {
-    if (!featureOn('topicFollow')) return '';
-    var key = cardTopicKey(card);
-    var label = topicFollowLabel(card);
-    var on = isLiveUser() && isTopicFollowed(key);
-    var aria = (on ? 'Following ' : 'Follow ') + label;
-    return '<button type="button" class="news-follow-btn' + (on ? ' is-following' : '') +
-      '" data-topic-follow="' + escapeHtml(key) +
-      '" data-topic-label="' + escapeHtml(label) +
-      '" aria-pressed="' + (on ? 'true' : 'false') +
-      '" aria-label="' + escapeHtml(aria) +
-      '" title="' + escapeHtml(aria) + '">' +
-      followIconSvg(on) +
-      '</button>';
-  }
-
-  function paintFollowBtn(btn, on) {
-    if (!btn) return;
-    var label = btn.getAttribute('data-topic-label') || 'topic';
-    var aria = (on ? 'Following ' : 'Follow ') + label;
-    btn.classList.toggle('is-following', !!on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.setAttribute('aria-label', aria);
-    btn.setAttribute('title', aria);
-    btn.innerHTML = followIconSvg(!!on);
-  }
-
-  function syncTopicFollowButtons() {
-    var buttons = document.querySelectorAll('[data-topic-follow]');
-    var signedIn = isLiveUser();
-    for (var i = 0; i < buttons.length; i++) {
-      var key = buttons[i].getAttribute('data-topic-follow');
-      paintFollowBtn(buttons[i], signedIn && isTopicFollowed(key));
-    }
-  }
-
-  function toggleTopicFollow(btn) {
-    if (!isLiveUser()) {
-      composeErr('Sign in to follow. Guest can only browse.');
-      openAuth('join');
-      return;
-    }
-    var key = btn && btn.getAttribute('data-topic-follow');
-    if (!key) return;
-    var next = !isTopicFollowed(key);
-    setTopicFollowed(key, next);
-    var buttons = document.querySelectorAll('[data-topic-follow="' + key + '"]');
-    for (var i = 0; i < buttons.length; i++) paintFollowBtn(buttons[i], next);
+  function toggleTopicFollow() { // factory-gp.js
+    if (PLUGIN.toggleTopicFollow) return PLUGIN.toggleTopicFollow.apply(null, arguments);
   }
 
   let currentUser = loadJSON(LS_USER, null);
-  let likes = loadJSON(LS_LIKES, {});
   let currentTab = 'foryou';
 
   function initials(name) {
@@ -977,48 +1030,19 @@
     return !!(fbAuth && fbAuth.currentUser);
   }
 
-  function sessionSeedList() {
-    if (!featureOn('sessionSeeds')) return [];
-    if (site && Array.isArray(site.sessionSeeds) && site.sessionSeeds.length) {
-      return site.sessionSeeds;
-    }
-    if (site && Array.isArray(site.seed)) {
-      return site.seed.filter(function (p) { return p && p.session === true; });
-    }
+  function sessionSeedPosts() { // factory-gp.js
+    if (PLUGIN.sessionSeedPosts) return PLUGIN.sessionSeedPosts.apply(null, arguments);
     return [];
-  }
-
-  function sessionSeedPosts() {
-    var now = Date.now();
-    return sessionSeedList().map(function (p, i) {
-      var hours = (p.hours != null) ? p.hours : i;
-      return {
-        id: String(p.id || ('session-seed-' + i)),
-        authorUid: null,
-        name: p.name || 'Room',
-        handle: p.handle || 'room',
-        text: p.text || '',
-        ms: now - hours * 3600000,
-        hours: hours,
-        likedBy: {},
-        likes: p.likes || 0,
-        replies: p.replies || 0,
-        parentId: null,
-        live: false,
-        sessionSeed: true,
-        imageUrl: p.imageUrl || null,
-        poll: null
-      };
-    });
   }
 
   function isSessionSeedPost(post) {
     return !!(post && post.sessionSeed);
   }
   function findPost(id) {
+    if (hiddenIds[id]) return null;
     var i;
-    for (i = 0; i < livePosts.length; i++) if (livePosts[i].id === id) return livePosts[i];
-    for (i = 0; i < nestPosts.length; i++) if (nestPosts[i].id === id) return nestPosts[i];
+    for (i = 0; i < livePosts.length; i++) if (livePosts[i].id === id && !isPostHidden(livePosts[i])) return livePosts[i];
+    for (i = 0; i < nestPosts.length; i++) if (nestPosts[i].id === id && !isPostHidden(nestPosts[i])) return nestPosts[i];
     var seeds = sessionSeedPosts();
     for (var j = 0; j < seeds.length; j++) if (seeds[j].id === id) return seeds[j];
     return null;
@@ -1052,77 +1076,61 @@
   }
 
   function ensureShareSheet() {
-    var ov = document.getElementById('share-sheet');
-    if (ov) return ov;
-    if (!document.getElementById('share-sheet-css')) {
-      var st = document.createElement('style');
-      st.id = 'share-sheet-css';
-      st.textContent =
-        '#share-sheet{position:fixed;inset:0;z-index:80;background:rgba(18,24,28,.42);display:flex;align-items:flex-end;justify-content:center;padding:16px;}' +
-        '#share-sheet[hidden]{display:none!important;}' +
-        '.share-sheet{width:min(420px,100%);background:var(--surface,#fffaf3);color:var(--text,#1a2a30);border:1px solid var(--border,#e4d6c4);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.18);padding:10px;}' +
-        '.share-sheet h3{margin:6px 8px 10px;font-size:15px;font-weight:650;}' +
-        '.share-sheet button{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:10px;padding:11px 12px;font:inherit;font-size:14px;cursor:pointer;color:inherit;}' +
-        '.share-sheet button:hover{background:rgba(0,0,0,.06);}' +
-        '.share-sheet .share-cancel{color:var(--text-muted,#4a5f66);margin-top:4px;}' +
-        '.share-sheet-preview{display:block;width:100%;max-height:160px;object-fit:cover;border-radius:10px;margin:0 0 8px;}' +
-        '.share-sheet-preview[hidden]{display:none!important;}' +
-        '.post.is-deep-post{box-shadow:inset 0 0 0 2px var(--accent,#e07a3d);border-radius:10px;}';
-      document.head.appendChild(st);
-    }
-    ov = document.createElement('div');
-    ov.id = 'share-sheet';
-    ov.hidden = true;
-    ov.innerHTML =
-      '<div class="share-sheet" role="dialog" aria-modal="true" aria-label="Share">' +
-        '<img class="share-sheet-preview" id="share-sheet-preview" alt="" hidden>' +
-        '<h3>Share</h3>' +
-        '<button type="button" data-share="copy">Copy link</button>' +
-        '<button type="button" data-share="x">Post on X</button>' +
-        '<button type="button" data-share="reddit">Post on Reddit</button>' +
-        '<button type="button" class="share-cancel" data-share="close">Cancel</button>' +
-      '</div>';
-    document.body.appendChild(ov);
-    ov.addEventListener('click', function (e) {
-      if (e.target === ov) { closeShareSheet(); return; }
-      var btn = e.target.closest('[data-share]');
-      if (!btn) return;
-      var act = btn.getAttribute('data-share');
-      if (act === 'close') { closeShareSheet(); return; }
-      if (!shareSheetPostId) return;
-      var post = findPost(shareSheetPostId);
-      var permalink = postPermalink(shareSheetPostId);
-      var slice = shareTextSlice(post);
-      if (act === 'copy') {
-        var done = function () { composeErr('Link copied'); closeShareSheet(); };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(permalink).then(done).catch(function () {
-            try { window.prompt('Copy link', permalink); } catch (e2) {}
-            done();
-          });
-        } else {
-          try { window.prompt('Copy link', permalink); } catch (e3) {}
-          done();
-        }
-        return;
-      }
-      if (act === 'x') {
-        var xUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(slice) +
-          '&url=' + encodeURIComponent(permalink);
-        window.open(xUrl, '_blank', 'noopener,noreferrer');
-        closeShareSheet();
-        return;
-      }
-      if (act === 'reddit') {
-        var rUrl = 'https://www.reddit.com/submit?url=' + encodeURIComponent(permalink) +
-          '&title=' + encodeURIComponent(slice);
-        var sr = site && site.redditSr;
-        if (sr) rUrl += '&sr=' + encodeURIComponent(String(sr));
-        window.open(rUrl, '_blank', 'noopener,noreferrer');
-        closeShareSheet();
-      }
-    });
-    return ov;
+   var ov = document.getElementById('share-sheet');
+   if (ov) return ov;
+   if (!document.getElementById('share-sheet-css')) {
+     var st = document.createElement('style');
+     st.id = 'share-sheet-css';
+     st.textContent =
+       '#share-sheet{position:fixed;inset:0;z-index:80;background:rgba(18,24,28,.42);display:flex;align-items:flex-end;justify-content:center;padding:16px;}#share-sheet[hidden]{display:none!important;}.share-sheet{width:min(420px,100%);background:var(--surface,#fffaf3);color:var(--text,#1a2a30);border:1px solid var(--border,#e4d6c4);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.18);padding:10px;}.share-sheet h3{margin:6px 8px 10px;font-size:15px;font-weight:650;}.share-sheet button{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:10px;padding:11px 12px;font:inherit;font-size:14px;cursor:pointer;color:inherit;}.share-sheet button:hover{background:rgba(0,0,0,.06);}.share-sheet .share-cancel{color:var(--text-muted,#4a5f66);margin-top:4px;}.share-sheet-preview{display:block;width:100%;max-height:160px;object-fit:cover;border-radius:10px;margin:0 0 8px;}.share-sheet-preview[hidden]{display:none!important;}.post.is-deep-post{box-shadow:inset 0 0 0 2px var(--accent,#e07a3d);border-radius:10px;}';
+     document.head.appendChild(st);
+   }
+   ov = document.createElement('div');
+   ov.id = 'share-sheet';
+   ov.hidden = true;
+   ov.innerHTML =
+     '<div class="share-sheet" role="dialog" aria-modal="true" aria-label="Share"><img class="share-sheet-preview" id="share-sheet-preview" alt="" hidden><h3>Share</h3><button type="button" data-share="copy">Copy link</button><button type="button" data-share="x">Share to x.com</button><button type="button" data-share="reddit">Share to Reddit</button><button type="button" class="share-cancel" data-share="close">Cancel</button></div>';
+   document.body.appendChild(ov);
+   ov.addEventListener('click', function (e) {
+     if (e.target === ov) { closeShareSheet(); return; }
+     var btn = e.target.closest('[data-share]');
+     if (!btn) return;
+     var act = btn.getAttribute('data-share');
+     if (act === 'close') { closeShareSheet(); return; }
+     if (!shareSheetPostId) return;
+     var post = findPost(shareSheetPostId);
+     var permalink = postPermalink(shareSheetPostId);
+     var slice = shareTextSlice(post);
+     if (act === 'copy') {
+       var done = function () { composeErr('Link copied'); closeShareSheet(); };
+       if (navigator.clipboard && navigator.clipboard.writeText) {
+         navigator.clipboard.writeText(permalink).then(done).catch(function () {
+           try { window.prompt('Copy link', permalink); } catch (e2) {}
+           done();
+         });
+       } else {
+         try { window.prompt('Copy link', permalink); } catch (e3) {}
+         done();
+       }
+       return;
+     }
+     if (act === 'x') {
+       var xUrl = 'https://x.com/intent/post?text=' + encodeURIComponent(slice) +
+         '&url=' + encodeURIComponent(permalink);
+       window.open(xUrl, '_blank', 'noopener,noreferrer');
+       closeShareSheet();
+       return;
+     }
+     if (act === 'reddit') {
+       var rUrl = 'https://www.reddit.com/submit?url=' + encodeURIComponent(permalink) +
+         '&title=' + encodeURIComponent(slice);
+       var sr = site && site.redditSr;
+       if (sr) rUrl += '&sr=' + encodeURIComponent(String(sr));
+       window.open(rUrl, '_blank', 'noopener,noreferrer');
+       closeShareSheet();
+     }
+   });
+   return ov;
   }
 
   function sharePost(postId) {
@@ -1171,6 +1179,10 @@
       var ce = document.getElementById('thoughts-compose-err');
       if ((action === 'report' || action === 'block') && !(ce && ce.offsetParent)) toast(msg);
     }
+    if (!accountsOpen() && !isAdminUser() && action !== 'report' && action !== 'block') {
+      gateErr(ACC_CLOSED);
+      return false;
+    }
     if (!isLiveUser()) {
       gateErr('Sign in to ' + (action || 'post') + '. Guest can only browse.');
       openAuth('join');
@@ -1180,8 +1192,6 @@
       gateErr('This room is paused.');
       return false;
     }
-    // Chat/DM replies: signed-in + not killed is enough. Google members
-    // can send without emailVerified. Post/like/vote/report/block still gate.
     if (action !== 'chat' && !isEmailVerified()) {
       gateErr('Verify your email before you ' + (action || 'post') + '. Check your inbox, then refresh.');
       var u = fbAuth.currentUser;
@@ -1228,24 +1238,29 @@
       if (dmsOn()) syncChatChrome();
     }, function () {});
   }
-  function reportPost(id) {
+  function reportPost(id, optReason) {
     if (!requireVerified('report')) return;
     var post = findPost(id);
     if (!post || !fbDb || isSessionSeedPost(post)) return;
     if (alreadyReported(id)) { toast('You already reported this post.'); return; }
-    var me = liveUid();
-    fbDb.collection('reports').add({
-      siteId: SITE_ID,
-      postId: id,
-      targetUid: post.authorUid || '',
-      reporterUid: me,
-      reason: 'abuse',
-      status: 'open',
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    }).then(function () {
+    if (!optReason) { pickReportReason(function (r) { if (r) reportPost(id, r); }); return; }
+    var reason = optReason, me = liveUid();
+    var addOnly = function () {
+      return fbDb.collection('reports').add({
+        siteId: SITE_ID,
+        postId: id,
+        targetUid: post.authorUid || '',
+        reporterUid: me,
+        reason: reason,
+        status: 'open',
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    };
+    var op = HIDE_REASONS[reason] ? commitAutoHideReport(id, post.authorUid || '', '', reason, addOnly) : addOnly();
+    op.then(function () {
       markReported(id);
-      toast('Reported. Thanks.');
-      writeReportAlert(post, me);
+      toast(HIDE_REASONS[reason] ? 'Reported and hidden pending review.' : 'Reported. Thanks.');
+      writeReportAlert(post, me, reason);
     }).catch(function (e) {
       toast(reportErr(e));
     });
@@ -1481,16 +1496,7 @@
     var st = document.createElement('style');
     st.id = 'early-welcome-css';
     st.textContent =
-      '.early-welcome[hidden]{display:none!important;}' +
-      '.early-welcome{margin:0.7rem 1rem 0.15rem;padding:0.85rem 0.95rem 0.85rem 1.05rem;' +
-        'background:var(--surface,#111);color:var(--text,#f4f4f4);' +
-        'border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;' +
-        'font-size:0.86rem;line-height:1.45;display:flex;gap:0.75rem;align-items:flex-start;}' +
-      '.early-welcome-copy{flex:1;}' +
-      '.early-welcome-dismiss{flex:0 0 auto;width:1.7rem;height:1.7rem;padding:0;' +
-        'border:1px solid var(--border,rgba(255,255,255,0.18));background:transparent;' +
-        'color:var(--text-muted,#9a9aa3);border-radius:8px;cursor:pointer;font-size:1.1rem;line-height:1;}' +
-      '.early-welcome-dismiss:hover{color:var(--text,#f4f4f4);background:rgba(255,255,255,0.06);}';
+      '.early-welcome[hidden]{display:none!important;}.early-welcome{margin:0.7rem 1rem 0.15rem;padding:0.85rem 0.95rem 0.85rem 1.05rem;background:var(--surface,#111);color:var(--text,#f4f4f4);border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;font-size:0.86rem;line-height:1.45;display:flex;gap:0.75rem;align-items:flex-start;}.early-welcome-copy{flex:1;}.early-welcome-dismiss{flex:0 0 auto;width:1.7rem;height:1.7rem;padding:0;border:1px solid var(--border,rgba(255,255,255,0.18));background:transparent;color:var(--text-muted,#9a9aa3);border-radius:8px;cursor:pointer;font-size:1.1rem;line-height:1;}.early-welcome-dismiss:hover{color:var(--text,#f4f4f4);background:rgba(255,255,255,0.06);}';
     document.head.appendChild(st);
   }
 
@@ -1945,7 +1951,7 @@
   }
 
   function closeSocialOverlays() {
-    ['explore-overlay', 'notif-overlay', 'chat-overlay', 'profile-overlay', 'reports-overlay'].forEach(function (id) {
+    ['explore-overlay', 'notif-overlay', 'chat-overlay', 'profile-overlay', 'reports-overlay', 'myreports-overlay'].forEach(function (id) {
       const el = document.getElementById(id);
       if (el) el.classList.remove('active', 'thread-open');
     });
@@ -1958,12 +1964,8 @@
     window.scrollTo(0, 0);
   }
 
-  function nestSlugNorm(s) {
-    return String(s || '').replace(/^#/, '').trim().toLowerCase();
-  }
-
   function slugifyNestLabel(label) {
-    return nestSlugNorm(label)
+    return nestKey(label)
       .replace(/['’]/g, '')
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
@@ -1975,22 +1977,22 @@
     if (!parts.length || parts.length > 1) return '';
     var first = parts[0];
     try { first = decodeURIComponent(first); } catch (e) { /* keep */ }
-    first = nestSlugNorm(first);
+    first = nestKey(first);
     if (!first || NEST_RESERVED[first]) return '';
     return first;
   }
 
   function findNest(slug) {
-    var key = nestSlugNorm(slug);
+    var key = nestKey(slug);
     if (!key) return null;
     for (var i = 0; i < NESTS.length; i++) {
-      if (nestSlugNorm(NESTS[i].slug) === key) return NESTS[i];
+      if (nestKey(NESTS[i].slug) === key) return NESTS[i];
     }
     return null;
   }
 
   function nestSlugError(slug) {
-    var key = nestSlugNorm(slug);
+    var key = nestKey(slug);
     if (!key) return 'Add a slug.';
     if (key.indexOf('/') !== -1) return 'One level only.';
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(key)) return 'Use lowercase letters, numbers, and hyphens.';
@@ -2005,10 +2007,10 @@
   }
 
   function nestHasActivity(slug) {
-    var key = nestSlugNorm(slug);
+    var key = nestKey(slug);
     if (!key) return false;
     for (var i = 0; i < livePosts.length; i++) {
-      if (nestSlugNorm(livePosts[i].nestSlug) === key) return true;
+      if (!isPostHidden(livePosts[i]) && nestKey(livePosts[i].nestSlug) === key) return true;
     }
     return false;
   }
@@ -2055,7 +2057,7 @@
     var seen = {};
     function push(n) {
       if (!n || !n.slug) return;
-      var key = nestSlugNorm(n.slug);
+      var key = nestKey(n.slug);
       if (!key || seen[key]) return;
       seen[key] = true;
       built.push(n);
@@ -2072,7 +2074,7 @@
   function absorbUserNests(list) {
     userNests = list || [];
     var have = {};
-    userNests.forEach(function (n) { have[nestSlugNorm(n.slug)] = true; });
+    userNests.forEach(function (n) { have[nestKey(n.slug)] = true; });
     Object.keys(pendingUserNests).forEach(function (k) {
       if (have[k]) delete pendingUserNests[k];
     });
@@ -2098,7 +2100,7 @@
         var list = [];
         snap.forEach(function (d) {
           var data = d.data() || {};
-          var slug = nestSlugNorm(data.slug || d.id);
+          var slug = nestKey(data.slug || d.id);
           if (!slug) return;
           list.push({
             slug: slug,
@@ -2310,14 +2312,7 @@
     list.className = 'nav-nests';
     list.setAttribute('aria-label', 'Nested rooms');
     list.innerHTML =
-      '<li class="nav-nests-label"><span>Nests</span>' +
-        '<button type="button" class="nav-nest-add" id="nav-nest-add" aria-label="Add a nested room" title="Add a nested room">+</button></li>' +
-      '<li class="nav-nest-form" id="nav-nest-form" hidden>' +
-        '<label>Label<input type="text" id="nest-add-label" maxlength="40" autocomplete="off" placeholder="Room name"></label>' +
-        '<label>Slug<input type="text" id="nest-add-slug" maxlength="40" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="room-name"></label>' +
-        '<p class="nav-nest-form-err" id="nest-add-err" role="status"></p>' +
-        '<button type="button" class="nav-nest-save" id="nest-add-save">Add room</button>' +
-      '</li>';
+      '<li class="nav-nests-label"><span>Nests</span><button type="button" class="nav-nest-add" id="nav-nest-add" aria-label="Add a nested room" title="Add a nested room">+</button></li><li class="nav-nest-form" id="nav-nest-form" hidden><label>Label<input type="text" id="nest-add-label" maxlength="40" autocomplete="off" placeholder="Room name"></label><label>Slug<input type="text" id="nest-add-slug" maxlength="40" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="room-name"></label><p class="nav-nest-form-err" id="nest-add-err" role="status"></p><button type="button" class="nav-nest-save" id="nest-add-save">Add room</button></li>';
     var items = document.createElement('li');
     var inner = document.createElement('ul');
     inner.id = 'nav-nests-items';
@@ -2375,8 +2370,6 @@
     });
   }
 
-  // Optional site.nestGroups: [{ label, parents: [...] }] prints sub-headers in the Nests nav.
-  // A nest whose parent is another nest's slug is a sub-nest (subsubX): listed right under that parent, indented.
   function nestGroupLabel(n) {
     if (!n) return null;
     if (n.user) return 'Your rooms';
@@ -2391,13 +2384,13 @@
   function orderedNavNests(shown) {
     var bySlug = {};
     var i;
-    for (i = 0; i < shown.length; i++) bySlug[nestSlugNorm(shown[i].slug)] = shown[i];
+    for (i = 0; i < shown.length; i++) bySlug[nestKey(shown[i].slug)] = shown[i];
     var kids = {};
     var top = [];
     for (i = 0; i < shown.length; i++) {
       var n = shown[i];
-      var p = n.parent ? nestSlugNorm(n.parent) : '';
-      if (p && bySlug[p] && p !== nestSlugNorm(n.slug)) {
+      var p = n.parent ? nestKey(n.parent) : '';
+      if (p && bySlug[p] && p !== nestKey(n.slug)) {
         (kids[p] = kids[p] || []).push(n);
       } else {
         top.push(n);
@@ -2406,7 +2399,7 @@
     var out = [];
     for (i = 0; i < top.length; i++) {
       out.push({ nest: top[i], depth: 0 });
-      var ch = kids[nestSlugNorm(top[i].slug)] || [];
+      var ch = kids[nestKey(top[i].slug)] || [];
       for (var c = 0; c < ch.length; c++) out.push({ nest: ch[c], depth: 1 });
     }
     return out;
@@ -2460,10 +2453,7 @@
       return;
     }
     pane.innerHTML = cards.map(function (c) {
-      return '<a class="explore-card" href="' + escapeHtml(nestPath(c.slug)) + '" data-nest="' + escapeHtml(c.slug) + '">' +
-        '<div class="explore-card-tag">' + escapeHtml(c.tag) + '</div>' +
-        '<div class="explore-card-title">' + escapeHtml(c.title) + '</div>' +
-        '<div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div></a>';
+      return '<a class="explore-card" href="' + escapeHtml(nestPath(c.slug)) + '" data-nest="' + escapeHtml(c.slug) + '"><div class="explore-card-tag">' + escapeHtml(c.tag) + '</div><div class="explore-card-title">' + escapeHtml(c.title) + '</div><div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div></a>';
     }).join('');
   }
 
@@ -2613,6 +2603,7 @@
   }
 
   function renderPostMedia(post) {
+    if (isPostHidden(post)) return '';
     var html = '';
     if (post.imageUrl) {
       html += '<div class="post-image"><img src="' + escapeHtml(post.imageUrl) + '" alt="" loading="lazy"></div>';
@@ -2628,11 +2619,7 @@
         for (var v = 0; v < keys.length; v++) if (votes[keys[v]] === i) count++;
         var pct = total ? Math.round((count / total) * 100) : 0;
         var voted = voterUid != null && votes[voterUid] === i;
-        html += '<div class="post-poll-option' + (voted ? ' voted' : '') + '" data-poll-idx="' + i + '" data-post-id="' + escapeHtml(String(post.id)) + '">' +
-          '<div class="post-poll-bar" style="width:' + pct + '%"></div>' +
-          '<span class="post-poll-label">' + escapeHtml(opt) + '</span>' +
-          '<span class="post-poll-pct">' + count + ' · ' + pct + '%</span>' +
-        '</div>';
+        html += '<div class="post-poll-option' + (voted ? ' voted' : '') + '" data-poll-idx="' + i + '" data-post-id="' + escapeHtml(String(post.id)) + '"><div class="post-poll-bar" style="width:' + pct + '%"></div><span class="post-poll-label">' + escapeHtml(opt) + '</span><span class="post-poll-pct">' + count + ' · ' + pct + '%</span></div>';
       });
       html += '<div class="post-poll-meta">' + total + ' vote' + (total === 1 ? '' : 's') + (voterUid ? '' : ' · sign in to vote') + '</div></div>';
     }
@@ -2640,6 +2627,7 @@
   }
 
   function renderPost(post, isReply) {
+    if (isPostHidden(post)) return '';
     const uid = liveUid();
     const liked = !!(uid && post.likedBy && post.likedBy[uid]);
     const likeCount = post.likes || 0;
@@ -2661,31 +2649,22 @@
       : '';
     return (
       '<article class="post' + (isReply ? ' post-reply' : '') + '" data-post-id="' + escapeHtml(post.id) + '"' +
-        (post.parentId ? ' data-parent-id="' + escapeHtml(post.parentId) + '"' : '') + '>' +
-        '<div class="post-avatar" style="background:' + bg + '">' + av + '</div>' +
-        '<div class="post-body">' +
-          '<div class="post-meta">' +
-            '<span class="post-name' + (canOpenProfile(post) ? ' post-name-link' : '') + '"' +
+        (post.parentId ? ' data-parent-id="' + escapeHtml(post.parentId) + '"' : '') + '><div class="post-avatar" style="background:' + bg + '">' + av + '</div><div class="post-body"><div class="post-meta"><span class="post-name' + (canOpenProfile(post) ? ' post-name-link' : '') + '"' +
               (canOpenProfile(post)
                 ? ' data-profile-uid="' + escapeHtml(post.authorUid) + '" data-profile-name="' + escapeHtml(post.name) + '" data-profile-handle="' + escapeHtml(post.handle) + '"'
                 : '') +
             '>' + escapeHtml(post.name) + '</span>' +
             stewardPillHtml(post) +
-            '<span class="post-handle">@' + escapeHtml(post.handle) + '</span>' +
-            '<span class="post-time">· ' + (post.hours != null ? post.hours + 'h' : 'now') + '</span>' +
-          '</div>' +
+            '<span class="post-handle">@' + escapeHtml(post.handle) + '</span><span class="post-time">· ' + (post.hours != null ? post.hours + 'h' : 'now') + '</span></div>' +
           (post.text ? '<p class="post-text">' + escapeHtml(post.text) + '</p>' : '') +
           renderPostMedia(post) +
           '<div class="post-actions">' +
             replyBtn +
-            '<button class="post-action' + (liked ? ' liked' : '') + '" data-act="like" type="button">Like · ' + likeCount + '</button>' +
-            '<button class="post-action" data-act="share" type="button">Share</button>' +
+            '<button class="post-action' + (liked ? ' liked' : '') + '" data-act="like" type="button">Like · ' + likeCount + '</button><button class="post-action" data-act="share" type="button">Share</button>' +
             reportBtn + blockBtn +
             delBtn +
             postOverflowHtml(post) +
-          '</div>' +
-        '</div>' +
-      '</article>'
+          '</div></div></article>'
     );
   }
 
@@ -2699,63 +2678,18 @@
 
   function topLevelPosts() {
     return postsForFeed().filter(function (p) {
-      if (p.parentId || (p.authorUid && blockedUids[p.authorUid])) return false;
-      if (currentNest) return nestSlugNorm(p.nestSlug) === nestSlugNorm(currentNest.slug);
+      if (p.parentId || isPostHidden(p) || (p.authorUid && blockedUids[p.authorUid])) return false;
+      if (currentNest) return nestKey(p.nestSlug) === nestKey(currentNest.slug);
       return true;
     });
   }
 
   function repliesFor(parentId) {
-    return postsForFeed().filter(function (p) { return p.parentId === parentId && !(p.authorUid && blockedUids[p.authorUid]); })
+    if (hiddenIds[parentId]) return [];
+    return postsForFeed().filter(function (p) { return p.parentId === parentId && !isPostHidden(p) && !(p.authorUid && blockedUids[p.authorUid]); })
       .sort(function (a, b) { return (a.ms || 0) - (b.ms || 0); });
   }
 
-  // Grid taxonomy lives on site.taxonomy (same catalog as taxonomy.json).
-  // Left-nav nests come from site.nests plus this user's Firestore rooms.
-  // taxonomyNestsDraft is not a nav source. Topic nestSlug does not drive the watchlist click.
-  function taxonomyCatalog() {
-    var tax = site && site.taxonomy;
-    if (!tax || typeof tax !== 'object') {
-      return { version: 0, name: 'Topics', symbolPrefix: '$', topics: [], defaultWatchlist: [] };
-    }
-    return tax;
-  }
-  function activeTopics() {
-    var topics = taxonomyCatalog().topics;
-    if (!Array.isArray(topics)) return [];
-    return topics.filter(function (t) {
-      return t && t.status === 'active' && t.id;
-    });
-  }
-  function topicById(id) {
-    if (!id) return null;
-    var topics = activeTopics();
-    for (var i = 0; i < topics.length; i++) {
-      if (topics[i].id === id) return topics[i];
-    }
-    return null;
-  }
-  function defaultWatchlistIds() {
-    var tax = taxonomyCatalog();
-    var ids = Array.isArray(tax.defaultWatchlist) ? tax.defaultWatchlist.slice() : [];
-    if (!ids.length) {
-      activeTopics().forEach(function (t) {
-        if (t.followDefault) ids.push(t.id);
-      });
-    }
-    return sanitizeTopicIds(ids);
-  }
-  function sanitizeTopicIds(ids) {
-    var seen = {};
-    var out = [];
-    (ids || []).forEach(function (id) {
-      var topic = topicById(id);
-      if (!topic || seen[topic.id]) return;
-      seen[topic.id] = true;
-      out.push(topic.id);
-    });
-    return out;
-  }
   function collectTopicIds(source) {
     var out = [];
     var seen = {};
@@ -2775,210 +2709,19 @@
     if (typeof source.topic === 'string') push(source.topic);
     return out;
   }
-  function postHasTopic(post, topicId) {
-    if (!post || !topicId) return false;
-    var ids = Array.isArray(post.topicIds) ? post.topicIds : collectTopicIds(post);
-    for (var i = 0; i < ids.length; i++) if (ids[i] === topicId) return true;
-    return false;
+  function addToWatchlist() { // factory-gp.js
+    if (PLUGIN.addToWatchlist) return PLUGIN.addToWatchlist.apply(null, arguments);
   }
-  // v1 stores the personal list beside other user prefs (localStorage).
-  // TODO: move to Firestore users/{uid}/watchlist/{siteId} → { topicIds, updatedAt }
-  // once security rules allow that subcollection. Never write the factory taxonomy.
-  function watchlistStoreKey(uid) {
-    return 'subx.watchlist.' + (SITE_ID || 'site') + '.' + String(uid || 'anon');
+  function removeFromWatchlist() { // factory-gp.js
+    if (PLUGIN.removeFromWatchlist) return PLUGIN.removeFromWatchlist.apply(null, arguments);
   }
-  function savePersonalWatchlist(topicIds) {
-    var uid = liveUid();
-    if (!uid) return;
-    saveJSON(watchlistStoreKey(uid), {
-      topicIds: topicIds.slice(),
-      updatedAt: new Date().toISOString()
-    });
-  }
-  function personalWatchlistIds() {
-    var uid = liveUid();
-    if (!uid) return defaultWatchlistIds();
-    var raw = loadJSON(watchlistStoreKey(uid), null);
-    if (!raw || !Array.isArray(raw.topicIds)) {
-      var seeded = defaultWatchlistIds();
-      savePersonalWatchlist(seeded);
-      return seeded;
-    }
-    return sanitizeTopicIds(raw.topicIds);
-  }
-  function addToWatchlist(id) {
-    if (!isLiveUser() || !topicById(id)) return;
-    var ids = personalWatchlistIds();
-    if (ids.indexOf(id) !== -1) return;
-    ids.push(id);
-    savePersonalWatchlist(ids);
-    renderWatchlist();
-  }
-  function removeFromWatchlist(id) {
-    if (!isLiveUser()) return;
-    var ids = personalWatchlistIds().filter(function (x) { return x !== id; });
-    savePersonalWatchlist(ids);
-    renderWatchlist();
-  }
-  function watchRowHtml(topic) {
-    var focused = focusedTopicId === topic.id;
-    var nest = topic.nestSlug ? ' data-nest-slug="' + escapeHtml(topic.nestSlug) + '"' : '';
-    var remove = isLiveUser()
-      ? '<button type="button" class="watchlist-remove" data-watch-remove="' + escapeHtml(topic.id) +
-        '" aria-label="Unfollow ' + escapeHtml(topic.label) + '" title="Unfollow">&times;</button>'
-      : '';
-    return '<li class="watchlist-row' + (focused ? ' is-focused' : '') + '">' +
-      '<button type="button" class="watchlist-open" data-watch-topic="' + escapeHtml(topic.id) + '"' + nest +
-        ' aria-current="' + (focused ? 'true' : 'false') + '"' +
-        ' title="' + escapeHtml(topic.blurb || topic.label) + '">' +
-        '<span class="watchlist-symbol">' + escapeHtml(topic.symbol || topic.id) + '</span>' +
-        '<span class="watchlist-label">' + escapeHtml(topic.label) + '</span>' +
-      '</button>' + remove + '</li>';
-  }
-  function renderWatchlistCatalog() {
-    var box = document.getElementById('watchlist-catalog');
-    if (!box) return;
-    if (!isLiveUser() || !watchlistPickerOpen) {
-      box.innerHTML = '';
-      return;
-    }
-    var have = {};
-    personalWatchlistIds().forEach(function (id) { have[id] = true; });
-    var q = String(watchlistQuery || '').trim().toLowerCase().replace(/^\$/, '');
-    var rows = activeTopics().filter(function (t) {
-      if (have[t.id]) return false;
-      if (!q) return true;
-      var hay = ((t.symbol || '') + ' ' + t.label + ' ' + t.id + ' ' + (t.blurb || '') + ' ' + (t.kind || '')).toLowerCase();
-      return hay.indexOf(q) !== -1;
-    });
-    if (!rows.length) {
-      box.innerHTML = '<li class="watchlist-catalog-empty">' +
-        (q ? 'No active topics match.' : 'Every active topic is already on your watchlist.') +
-        '</li>';
-      return;
-    }
-    box.innerHTML = rows.map(function (t) {
-      return '<li class="watchlist-catalog-row">' +
-        '<span class="watchlist-symbol">' + escapeHtml(t.symbol || '') + '</span>' +
-        '<span class="watchlist-catalog-copy"><span class="watchlist-label">' + escapeHtml(t.label) + '</span>' +
-        (t.blurb ? '<span class="watchlist-blurb">' + escapeHtml(t.blurb) + '</span>' : '') +
-        '</span>' +
-        '<button type="button" class="watchlist-follow" data-watch-add="' + escapeHtml(t.id) + '">Follow</button>' +
-      '</li>';
-    }).join('');
-  }
-  function renderWatchlist() {
+  function renderWatchlist() { // factory-gp.js
+    if (PLUGIN.renderWatchlist) return PLUGIN.renderWatchlist.apply(null, arguments);
     var box = document.getElementById('watchlist');
-    if (!featureOn('watchlist')) { if (box) box.hidden = true; return; }
-    if (box) box.hidden = false;
-    var list = document.getElementById('watchlist-list');
-    if (!list) return;
-    var tax = taxonomyCatalog();
-    var kicker = document.getElementById('watchlist-kicker');
-    if (kicker) kicker.textContent = tax.name || 'Topics';
-    var signedIn = isLiveUser();
-    if (!signedIn) watchlistPickerOpen = false;
-    var ids = signedIn ? personalWatchlistIds() : defaultWatchlistIds();
-    var html = '';
-    ids.forEach(function (id) {
-      var topic = topicById(id);
-      if (topic) html += watchRowHtml(topic);
-    });
-    list.innerHTML = html;
-    var addBtn = document.getElementById('watchlist-add');
-    if (addBtn) {
-      addBtn.hidden = !signedIn;
-      addBtn.textContent = watchlistPickerOpen ? 'Close' : 'Add';
-      addBtn.setAttribute('aria-expanded', watchlistPickerOpen ? 'true' : 'false');
-    }
-    var note = document.getElementById('watchlist-note');
-    if (note) {
-      var taxName = tax.name || 'Topics';
-      if (!signedIn) {
-        note.hidden = false;
-        if (!activeTopics().length) {
-          note.textContent = (taxName || 'Topics') + ' topics are not loaded.';
-        } else {
-          note.innerHTML = '<button type="button" class="watchlist-signin" data-watch-signin>Sign in</button> to personalize. These are the ' + escapeHtml(taxName) + ' defaults.';
-        }
-      } else if (!ids.length) {
-        note.hidden = false;
-        note.textContent = 'Your watchlist is empty. Add a topic from the ' + taxName + ' catalog.';
-      } else {
-        note.hidden = true;
-        note.textContent = '';
-      }
-    }
-    var picker = document.getElementById('watchlist-picker');
-    if (picker) picker.hidden = !signedIn || !watchlistPickerOpen;
-    var search = document.getElementById('watchlist-search');
-    if (search) {
-      var taxLabel = tax.name || 'Topics';
-      search.placeholder = 'Search ' + taxLabel + ' topics';
-      search.setAttribute('aria-label', 'Search ' + taxLabel + ' topics to follow');
-      if (!search.dataset.wired) {
-        search.dataset.wired = '1';
-        search.addEventListener('input', function () {
-          watchlistQuery = search.value || '';
-          renderWatchlistCatalog();
-        });
-      }
-    }
-    renderWatchlistCatalog();
+    if (box) box.hidden = true;
   }
-  function topicFocusHtml(topic) {
-    var symbol = topic && topic.symbol ? topic.symbol : (focusedTopicId || 'Topic');
-    var label = topic ? topic.label : 'Not in this room';
-    var blurb = topic && topic.blurb
-      ? '<div class="topic-focus-blurb">' + escapeHtml(topic.blurb) + '</div>'
-      : '';
-    return '<div class="topic-focus">' +
-      '<div class="topic-focus-copy">' +
-        '<div class="topic-focus-title"><span class="topic-focus-symbol">' + escapeHtml(symbol) + '</span>' +
-        '<span class="topic-focus-label">' + escapeHtml(label) + '</span></div>' +
-        blurb +
-      '</div>' +
-      '<button type="button" class="topic-focus-clear" data-topic-clear>For You</button>' +
-    '</div>';
-  }
-  function renderTopicFeed() {
-    var el = document.getElementById('thoughts-feed');
-    if (!el) return;
-    var topic = topicById(focusedTopicId);
-    var symbol = topic && topic.symbol ? topic.symbol : focusedTopicId;
-    var head = topicFocusHtml(topic);
-    if (!topic) {
-      el.innerHTML = head + '<div class="post-empty"><strong>That topic is not in this room.</strong></div>';
-      refreshPorchUi();
-      return;
-    }
-    if (!liveReady && !liveError) {
-      el.innerHTML = head + '<div class="post-empty">Connecting to the live feed…</div>';
-      refreshPorchUi();
-      return;
-    }
-    if (liveError) {
-      el.innerHTML = head + '<div class="post-empty"><strong>Live feed could not load.</strong><p>No tagged posts to show.</p></div>';
-      refreshPorchUi();
-      return;
-    }
-    var seeds = (currentNest ? [] : sessionSeedPosts()).filter(function (p) { return postHasTopic(p, focusedTopicId); });
-    var posts = topLevelPosts().filter(function (p) { return postHasTopic(p, focusedTopicId); });
-    var seedIds = {};
-    for (var si = 0; si < seeds.length; si++) seedIds[seeds[si].id] = true;
-    posts = seeds.concat(posts.filter(function (p) { return !seedIds[p.id]; }));
-    if (!posts.length) {
-      el.innerHTML = head + '<div class="post-empty"><strong>No posts tagged ' + escapeHtml(symbol) + ' yet.</strong>' +
-        '<p>Nothing in the feed is tagged with this topic.</p></div>';
-      refreshPorchUi();
-      return;
-    }
-    el.innerHTML = head + posts.map(function (p) {
-      var kids = repliesFor(p.id);
-      return renderPost(p, false) + kids.map(function (r) { return renderPost(r, true); }).join('');
-    }).join('');
-    highlightDeepPost();
-    refreshPorchUi();
+  function renderTopicFeed() { // factory-gp.js
+    if (PLUGIN.renderTopicFeed) return PLUGIN.renderTopicFeed.apply(null, arguments);
   }
 
   function canOpenProfile(post) {
@@ -3027,7 +2770,7 @@
       return;
     }
     var posts = livePosts.filter(function (p) {
-      if (!p || p.parentId) return false;
+      if (!p || p.parentId || isPostHidden(p)) return false;
       if (p.authorUid && blockedUids[p.authorUid]) return false;
       return !!(p.authorUid && followingUids[p.authorUid]);
     });
@@ -3110,41 +2853,15 @@
 
   var RAIL_MAX = 3;
 
-  function nwsHeaders(accept) {
-    var cfg = railCfg();
-    var ua = cfg.userAgent || ((site && site.name) || SITE_ID || 'subx') + '/rail (jebb@subx.it)';
-    return {
-      'Accept': accept || 'application/geo+json',
-      'User-Agent': ua
-    };
-  }
-
-  function nwsTagFor(shortForecast) {
-    var s = String(shortForecast || '').toLowerCase();
-    if (/\bfog\b/.test(s)) return 'Fog';
-    return 'NWS';
-  }
-
   function renderTrendCard(t) {
     const href = t.url || '#';
     const extra = t.url ? ' target="_blank" rel="noopener noreferrer"' : '';
     if (!featureOn('topicFollow')) {
-      return '<a class="news-item" href="' + escapeHtml(href) + '"' + extra + '>' +
-        '<div class="news-item-tag">' + escapeHtml(t.tag) + '</div>' +
-        '<div class="news-item-headline">' + escapeHtml(t.headline) + '</div>' +
-        '<div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div>' +
-        '<div class="news-item-meta">' + escapeHtml(t.meta) + '</div>' +
-      '</a>';
+      return '<a class="news-item" href="' + escapeHtml(href) + '"' + extra + '><div class="news-item-tag">' + escapeHtml(t.tag) + '</div><div class="news-item-headline">' + escapeHtml(t.headline) + '</div><div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div><div class="news-item-meta">' + escapeHtml(t.meta) + '</div></a>';
     }
     return '<article class="news-item">' +
       renderFollowBtn(t) +
-      '<a class="news-item-main" href="' + escapeHtml(href) + '"' + extra + '>' +
-        '<div class="news-item-tag">' + escapeHtml(t.tag) + '</div>' +
-        '<div class="news-item-headline">' + escapeHtml(t.headline) + '</div>' +
-        '<div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div>' +
-        '<div class="news-item-meta">' + escapeHtml(t.meta) + '</div>' +
-      '</a>' +
-    '</article>';
+      '<a class="news-item-main" href="' + escapeHtml(href) + '"' + extra + '><div class="news-item-tag">' + escapeHtml(t.tag) + '</div><div class="news-item-headline">' + escapeHtml(t.headline) + '</div><div class="news-item-snippet">' + escapeHtml(t.snippet) + '</div><div class="news-item-meta">' + escapeHtml(t.meta) + '</div></a></article>';
   }
 
   function factCardHtml() {
@@ -3161,12 +2878,10 @@
       body = fact.body || fact.snippet || '';
     }
     if (!body && !headline) return '';
-    return '<div class="news-item news-item-fact">' +
-      '<div class="news-item-tag">' + escapeHtml(tag) + '</div>' +
+    return '<div class="news-item news-item-fact"><div class="news-item-tag">' + escapeHtml(tag) + '</div>' +
       (headline ? '<div class="news-item-headline">' + escapeHtml(headline) + '</div>' : '') +
       (body ? '<div class="news-item-snippet">' + escapeHtml(body) + '</div>' : '') +
-      '<div class="news-item-meta">' + escapeHtml(railCfg().meta || 'Preview · noindex') + '</div>' +
-    '</div>';
+      '<div class="news-item-meta">' + escapeHtml(railCfg().meta || 'Preview · noindex') + '</div></div>';
   }
 
   function porchCardHtml() {
@@ -3186,13 +2901,7 @@
     }).join('');
     return '<div class="news-item news-item-porch">' +
       renderFollowBtn(porchCard) +
-      '<div class="news-item-tag">Porch</div>' +
-      '<div class="news-item-headline">' + escapeHtml(prompt) + '</div>' +
-      '<div class="news-item-snippet">Pick a side. Posts to this room.</div>' +
-      '<div class="porch-btns">' + btns + '</div>' +
-      '<div class="porch-tally" aria-live="polite">' + escapeHtml(porchTallyLine()) + '</div>' +
-      '<div class="news-item-meta">This room</div>' +
-    '</div>';
+      '<div class="news-item-tag">Porch</div><div class="news-item-headline">' + escapeHtml(prompt) + '</div><div class="news-item-snippet">Pick a side. Posts to this room.</div><div class="porch-btns">' + btns + '</div><div class="porch-tally" aria-live="polite">' + escapeHtml(porchTallyLine()) + '</div><div class="news-item-meta">This room</div></div>';
   }
 
   function ensureRailCss() {
@@ -3200,32 +2909,10 @@
     var st = document.createElement('style');
     st.id = 'rail-porch-css';
     st.textContent =
-      '.news-item{display:block;padding:1rem 1.4rem;border-bottom:1px solid rgba(255,255,255,0.06);}' +
-      'a.news-item{text-decoration:none;cursor:pointer;}' +
-      '.porch-btns{display:flex;gap:0.45rem;margin:0.45rem 0 0.2rem;flex-wrap:wrap;}' +
-      '.porch-btn{font:inherit;font-size:0.78rem;font-weight:600;padding:0.35rem 0.8rem;border-radius:999px;' +
-        'border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.08);color:#f0f4f7;cursor:pointer;}' +
-      '.porch-btn:hover{background:rgba(255,255,255,0.16);}' +
-      '.porch-btn-picked{border-color:var(--accent,#e07a3d);background:rgba(224,122,61,0.28);box-shadow:inset 0 0 0 1px var(--accent,#e07a3d);}' +
-      '.porch-tally{font-size:0.75rem;line-height:1.4;color:#8aa0b0;margin:0.28rem 0 0.1rem;}' +
-      '.news-page-list .news-item{background:var(--surface,#f4f7fa);border:1px solid var(--border,#c9d5de);border-radius:10px;padding:1.05rem 1.15rem;}' +
-      '.news-page-list .porch-btn{border-color:var(--border,#c9d5de);background:#fff;color:var(--text,#12202c);}' +
-      '.news-page-list .porch-btn:hover{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);}' +
-      '.news-page-list .porch-btn-picked{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);background:rgba(192,54,44,0.08);}' +
-      '.news-page-list .porch-tally{color:var(--text-muted,#4a5f66);}' +
-      '[data-porch-dwell] .news-item-porch{padding-top:1.25rem;padding-bottom:1.25rem;}';
+      '.news-item{display:block;padding:1rem 1.4rem;border-bottom:1px solid rgba(255,255,255,0.06);}a.news-item{text-decoration:none;cursor:pointer;}.porch-btns{display:flex;gap:0.45rem;margin:0.45rem 0 0.2rem;flex-wrap:wrap;}.porch-btn{font:inherit;font-size:0.78rem;font-weight:600;padding:0.35rem 0.8rem;border-radius:999px;border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.08);color:#f0f4f7;cursor:pointer;}.porch-btn:hover{background:rgba(255,255,255,0.16);}.porch-btn-picked{border-color:var(--accent,#e07a3d);background:rgba(224,122,61,0.28);box-shadow:inset 0 0 0 1px var(--accent,#e07a3d);}.porch-tally{font-size:0.75rem;line-height:1.4;color:#8aa0b0;margin:0.28rem 0 0.1rem;}.news-page-list .news-item{background:var(--surface,#f4f7fa);border:1px solid var(--border,#c9d5de);border-radius:10px;padding:1.05rem 1.15rem;}.news-page-list .porch-btn{border-color:var(--border,#c9d5de);background:#fff;color:var(--text,#12202c);}.news-page-list .porch-btn:hover{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);}.news-page-list .porch-btn-picked{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);background:rgba(192,54,44,0.08);}.news-page-list .porch-tally{color:var(--text-muted,#4a5f66);}[data-porch-dwell] .news-item-porch{padding-top:1.25rem;padding-bottom:1.25rem;}';
     if (featureOn('topicFollow')) {
       st.textContent +=
-        '.news-item{padding:1rem 2.8rem 1rem 1.4rem;position:relative;}' +
-        'a.news-item,.news-item-main{text-decoration:none;cursor:pointer;color:inherit;display:block;padding-right:2.15rem;}' +
-        '.news-follow-btn{position:absolute;top:0.75rem;right:0.85rem;z-index:2;width:28px;height:28px;padding:0;border-radius:999px;' +
-          'border:1px solid var(--accent,#e10600);background:transparent;color:var(--accent,#e10600);cursor:pointer;' +
-          'display:inline-flex;align-items:center;justify-content:center;}' +
-        '.news-follow-btn:hover{background:rgba(225,6,0,0.14);}' +
-        '.news-follow-btn:focus-visible{outline:2px solid var(--accent,#e10600);outline-offset:2px;}' +
-        '.news-follow-btn.is-following{background:var(--accent,#e10600);color:#fff;border-color:var(--accent,#e10600);}' +
-        '.news-page-list .news-follow-btn{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);}' +
-        '.news-page-list .news-follow-btn.is-following{background:var(--accent,#c0362c);color:#fff;border-color:var(--accent,#c0362c);}';
+        '.news-item{padding:1rem 2.8rem 1rem 1.4rem;position:relative;}a.news-item,.news-item-main{text-decoration:none;cursor:pointer;color:inherit;display:block;padding-right:2.15rem;}.news-follow-btn{position:absolute;top:0.75rem;right:0.85rem;z-index:2;width:28px;height:28px;padding:0;border-radius:999px;border:1px solid var(--accent,#e10600);background:transparent;color:var(--accent,#e10600);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}.news-follow-btn:hover{background:rgba(225,6,0,0.14);}.news-follow-btn:focus-visible{outline:2px solid var(--accent,#e10600);outline-offset:2px;}.news-follow-btn.is-following{background:var(--accent,#e10600);color:#fff;border-color:var(--accent,#e10600);}.news-page-list .news-follow-btn{border-color:var(--accent,#c0362c);color:var(--accent,#c0362c);}.news-page-list .news-follow-btn.is-following{background:var(--accent,#c0362c);color:#fff;border-color:var(--accent,#c0362c);}';
     }
     document.head.appendChild(st);
   }
@@ -3338,7 +3025,7 @@
   }
 
   function sendPixel(eventName) {
-    if (site && site.pixel === false) return; // opt-out per room (privacy v1.1 gate); default on as in T0
+    if (site && site.pixel === false) return;
     try {
       var k = 'subx.vid';
       var v = localStorage.getItem(k);
@@ -3433,9 +3120,7 @@
       return '<a class="rail-overlay-cta" href="' + escapeHtml(link.url) +
         '" target="_blank" rel="noopener noreferrer">' + escapeHtml(link.label) + '</a>';
     }).join('');
-    el.innerHTML = '<div class="rail-overlay-card">' +
-      '<div class="rail-overlay-kicker">' + escapeHtml(kicker) + '</div>' +
-      '<p class="rail-overlay-headline" id="rail-overlay-headline">' + escapeHtml(headline) + '</p>' +
+    el.innerHTML = '<div class="rail-overlay-card"><div class="rail-overlay-kicker">' + escapeHtml(kicker) + '</div><p class="rail-overlay-headline" id="rail-overlay-headline">' + escapeHtml(headline) + '</p>' +
       (linkHtml ? '<div class="rail-overlay-links">' + linkHtml + '</div>' : '') +
       '</div>';
     panel.appendChild(el);
@@ -3500,200 +3185,14 @@
     window.addEventListener('resize', syncRailOverlayViewport);
   }
 
-  function nwsCardFromPeriod(period, href, meta) {
-    var name = period.name || 'Forecast';
-    var short = period.shortForecast || '';
-    var temp = (period.temperature != null)
-      ? (period.temperature + '°' + (period.temperatureUnit || 'F'))
-      : '';
-    var snippet = short + (temp ? ' · ' + temp : '');
-    return {
-      tag: nwsTagFor(short),
-      headline: name,
-      snippet: snippet,
-      meta: meta,
-      url: href
-    };
+  function fetchNwsCards() { // factory-rail.js
+    if (PLUGIN.fetchNwsCards) return PLUGIN.fetchNwsCards.apply(null, arguments);
+    return Promise.reject(new Error('factory-rail.js not loaded'));
   }
 
-  function nwsCardFromAlert(feature, href, meta) {
-    var p = (feature && feature.properties) || {};
-    var headline = p.headline || p.event || '';
-    if (!headline) return null;
-    var desc = String(p.description || p.instruction || '').replace(/\s+/g, ' ').trim();
-    return {
-      tag: 'Alert',
-      headline: headline,
-      snippet: desc ? desc.slice(0, 160) : (p.event || 'Active NWS alert'),
-      meta: meta,
-      url: p.web || href
-    };
-  }
-
-  function resolveForecastUrl(cfg, headers) {
-    if (cfg.forecastUrl) return Promise.resolve(cfg.forecastUrl);
-    if (cfg.lat == null || cfg.lon == null) return Promise.reject(new Error('no nws point'));
-    var points = 'https://api.weather.gov/points/' + cfg.lat + ',' + cfg.lon;
-    return fetch(points, { headers: headers }).then(function (res) {
-      if (!res.ok) throw new Error('nws points ' + res.status);
-      return res.json();
-    }).then(function (data) {
-      var url = data && data.properties && data.properties.forecast;
-      if (!url) throw new Error('nws points missing forecast');
-      return url;
-    });
-  }
-
-  function fetchNwsCards() {
-    var cfg = railCfg();
-    var headers = nwsHeaders();
-    var meta = cfg.meta || 'Live';
-    var pageHref = cfg.forecastPage || cfg.forecastUrl || 'https://www.weather.gov/';
-    return resolveForecastUrl(cfg, headers).then(function (forecastUrl) {
-      if (!cfg.forecastPage && forecastUrl) pageHref = forecastUrl;
-      var forecastJob = fetch(forecastUrl, { headers: headers }).then(function (res) {
-        if (!res.ok) throw new Error('nws forecast ' + res.status);
-        return res.json();
-      });
-      var alertsUrl = cfg.alertsUrl;
-      if (!alertsUrl && cfg.zone) {
-        alertsUrl = 'https://api.weather.gov/alerts/active?zone=' + encodeURIComponent(cfg.zone);
-      }
-      var alertsJob = alertsUrl
-        ? fetch(alertsUrl, { headers: headers }).then(function (res) {
-            return res.ok ? res.json() : { features: [] };
-          }).catch(function () { return { features: [] }; })
-        : Promise.resolve({ features: [] });
-      return Promise.all([forecastJob, alertsJob]);
-    }).then(function (pair) {
-      var forecast = pair[0] || {};
-      var alerts = pair[1] || {};
-      var cards = [];
-      var features = alerts.features || [];
-      for (var i = 0; i < features.length; i++) {
-        var alertCard = nwsCardFromAlert(features[i], pageHref, meta);
-        if (alertCard) cards.push(alertCard);
-      }
-      var periods = (forecast.properties && forecast.properties.periods) || [];
-      for (var p = 0; p < periods.length; p++) {
-        cards.push(nwsCardFromPeriod(periods[p], pageHref, meta));
-      }
-      if (!periods.length) throw new Error('nws forecast empty');
-      return cards;
-    });
-  }
-
-  function cwfHeadline(name) {
-    return String(name || 'Forecast')
-      .toLowerCase()
-      .replace(/\b[a-z]/g, function (ch) { return ch.toUpperCase(); })
-      .replace(/\bOf\b/g, 'of');
-  }
-
-  function cwfSnippet(body) {
-    var flat = String(body || '').replace(/\s+/g, ' ').trim();
-    if (!flat) return '';
-    var wind = /[^.]*(?:\bwind|\bwinds)[^.]*\.?/i.exec(flat);
-    var seas = /[^.]*(?:\bseas?\b|\bswell\b)[^.]*\.?/i.exec(flat);
-    var bits = [];
-    if (wind) bits.push(wind[0].trim().replace(/\.+$/, '') + '.');
-    if (seas && (!wind || seas.index !== wind.index)) bits.push(seas[0].trim().replace(/\.+$/, '') + '.');
-    if (bits.length) return bits.join(' ');
-    return flat.slice(0, 160);
-  }
-
-  function cwfTag(productText) {
-    return /small craft/i.test(String(productText || '')) ? 'Advisory' : 'Seas';
-  }
-
-  function parseCwfPeriods(productText) {
-    var text = String(productText || '');
-    var cut = text.search(/\n&&(?:\n|$)/);
-    if (cut < 0) cut = text.search(/\n\.VAAIGA\b/);
-    if (cut > 0) text = text.slice(0, cut);
-    var periodRe = /^\.([A-Z][A-Z \-]{1,40})\.{2,}(.*)$/;
-    var lines = text.split(/\n/);
-    var periods = [];
-    var cur = null;
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var m = line.match(periodRe);
-      if (m) {
-        if (cur) periods.push(cur);
-        cur = { name: m[1].replace(/\s+/g, ' ').trim(), body: m[2] || '' };
-        continue;
-      }
-      if (cur) {
-        if (/^\$\$/.test(line) || /^&&/.test(line)) {
-          periods.push(cur);
-          cur = null;
-          break;
-        }
-        if (line.trim()) cur.body += ' ' + line;
-      }
-    }
-    if (cur) periods.push(cur);
-    return periods.filter(function (p) {
-      return p.name && !/^(SYNOPSIS|VAAIGA|PO|ASO)\b/.test(p.name);
-    });
-  }
-
-  function parseCwfCards(productText, href, meta) {
-    var periods = parseCwfPeriods(productText);
-    var tag = cwfTag(productText);
-    var cards = [];
-    var n = Math.min(2, periods.length);
-    for (var i = 0; i < n; i++) {
-      var snippet = cwfSnippet(periods[i].body);
-      if (!snippet) continue;
-      cards.push({
-        tag: tag,
-        headline: cwfHeadline(periods[i].name),
-        snippet: snippet,
-        meta: meta,
-        url: href
-      });
-    }
-    return cards;
-  }
-
-  function latestCwfProductId(data) {
-    var graph = (data && (data['@graph'] || data.graph)) || [];
-    if (!graph.length && data && (data.id || data['@id'])) graph = [data];
-    graph = graph.slice().sort(function (a, b) {
-      return String((b && b.issuanceTime) || '').localeCompare(String((a && a.issuanceTime) || ''));
-    });
-    var latest = graph[0];
-    if (!latest) return '';
-    if (latest.id) return String(latest.id);
-    if (latest['@id']) return String(latest['@id']).replace(/^.*\//, '');
-    return '';
-  }
-
-  function fetchCwfCards() {
-    var cfg = railCfg();
-    var headers = nwsHeaders('application/ld+json');
-    var loc = cfg.productLocation || 'PPG';
-    var type = cfg.productType || 'CWF';
-    var meta = cfg.meta || 'Live';
-    var pageHref = cfg.forecastPage || 'https://www.weather.gov/ppg/marine';
-    var listUrl = 'https://api.weather.gov/products/types/' + encodeURIComponent(type) +
-      '/locations/' + encodeURIComponent(loc);
-    return fetch(listUrl, { headers: headers }).then(function (res) {
-      if (!res.ok) throw new Error('nws cwf list ' + res.status);
-      return res.json();
-    }).then(function (data) {
-      var id = latestCwfProductId(data);
-      if (!id) throw new Error('nws cwf missing id');
-      return fetch('https://api.weather.gov/products/' + encodeURIComponent(id), { headers: headers });
-    }).then(function (res) {
-      if (!res.ok) throw new Error('nws cwf product ' + res.status);
-      return res.json();
-    }).then(function (prod) {
-      var cards = parseCwfCards(prod && prod.productText, pageHref, meta);
-      if (!cards.length) throw new Error('nws cwf parse empty');
-      return cards;
-    });
+  function fetchCwfCards() { // factory-rail.js
+    if (PLUGIN.fetchCwfCards) return PLUGIN.fetchCwfCards.apply(null, arguments);
+    return Promise.reject(new Error('factory-rail.js not loaded'));
   }
 
 
@@ -3716,512 +3215,15 @@
     return out;
   }
 
-  function bartCdata(node) {
-    if (node == null) return '';
-    if (typeof node === 'string') return node;
-    if (typeof node === 'number') return String(node);
-    return node['#cdata-section'] || node['#text'] || node.description || '';
+  function fetchBartCards() { // factory-rail.js
+    if (PLUGIN.fetchBartCards) return PLUGIN.fetchBartCards.apply(null, arguments);
+    return Promise.reject(new Error('factory-rail.js not loaded'));
   }
 
-  function fetchBartCards() {
-    var cfg = railCfg();
-    var key = cfg.bartKey || 'MW9S-E7SL-26DU-VV8V';
-    var url = cfg.bartUrl || ('https://api.bart.gov/api/bsa.aspx?cmd=bsa&json=y&key=' + encodeURIComponent(key));
-    var meta = cfg.meta || 'Live · BART';
-    var href = cfg.forecastPage || 'https://www.bart.gov/schedules/advisories';
-    return fetch(url).then(function (res) {
-      if (!res.ok) throw new Error('bart bsa ' + res.status);
-      return res.json();
-    }).then(function (data) {
-      var root = (data && data.root) || {};
-      var raw = root.bsa;
-      var list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-      var cards = [];
-      for (var i = 0; i < list.length; i++) {
-        var item = list[i] || {};
-        var desc = String(bartCdata(item.description) || bartCdata(item.sms_text) || '').replace(/\s+/g, ' ').trim();
-        if (!desc) continue;
-        if (/^no delay/i.test(desc) && list.length > 1) continue;
-        var typ = String(item.type || 'Advisory').toLowerCase();
-        var tag = /delay/.test(typ) || /delay/.test(desc.toLowerCase()) ? 'Delay' : 'BART';
-        var station = item.station && item.station !== 'BART' ? String(item.station) : '';
-        cards.push({
-          tag: tag,
-          headline: station || (tag === 'Delay' ? 'Delay advisory' : 'BART advisory'),
-          snippet: desc.slice(0, 180),
-          meta: meta,
-          url: href
-        });
-      }
-      if (!cards.length) {
-        cards.push({
-          tag: 'BART',
-          headline: 'No delay advisory',
-          snippet: 'BART reports no current BSA. Porch still posts into this room.',
-          meta: meta,
-          url: href
-        });
-      }
-      return cards;
-    });
-  }
 
-  var F1_SESSION_KEYS = [
-    ['FirstPractice', 'FP1'],
-    ['SecondPractice', 'FP2'],
-    ['ThirdPractice', 'FP3'],
-    ['SprintQualifying', 'Sprint Quali'],
-    ['Sprint', 'Sprint'],
-    ['Qualifying', 'Quali']
-  ];
-  var F1_SESSION_MS = {
-    FP1: 60 * 60 * 1000,
-    FP2: 60 * 60 * 1000,
-    FP3: 60 * 60 * 1000,
-    'Sprint Quali': 60 * 60 * 1000,
-    Sprint: 45 * 60 * 1000,
-    Quali: 60 * 60 * 1000,
-    Race: 2 * 60 * 60 * 1000
-  };
-
-  function f1ParseWhen(sess) {
-    if (!sess || !sess.date) return null;
-    var time = sess.time || '00:00:00Z';
-    if (!/Z$/i.test(time)) time += 'Z';
-    var d = new Date(sess.date + 'T' + time);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  function f1FormatLocal(d) {
-    if (!d) return '';
-    return d.toLocaleString('en-US', {
-      timeZone: 'America/Denver',
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
-    }) + ' MT';
-  }
-
-  function f1Sessions(race) {
-    var out = [];
-    if (!race) return out;
-    for (var i = 0; i < F1_SESSION_KEYS.length; i++) {
-      var key = F1_SESSION_KEYS[i][0];
-      var label = F1_SESSION_KEYS[i][1];
-      var when = f1ParseWhen(race[key]);
-      if (when) out.push({ label: label, when: when, ms: when.getTime() });
-    }
-    var raceWhen = f1ParseWhen({ date: race.date, time: race.time });
-    if (raceWhen) out.push({ label: 'Race', when: raceWhen, ms: raceWhen.getTime() });
-    out.sort(function (a, b) { return a.ms - b.ms; });
-    return out;
-  }
-
-  function f1RaceFromPayload(data) {
-    var races = data && data.MRData && data.MRData.RaceTable && data.MRData.RaceTable.Races;
-    return (races && races[0]) || null;
-  }
-
-  function f1CardsFromRace(race, cfg, finished) {
-    var circuit = (race && race.Circuit) || {};
-    var loc = circuit.Location || {};
-    var href = race.url || circuit.url || '';
-    var meta = (cfg && cfg.meta) || 'Live · race weekend';
-    var cmo = (cfg && cfg.cmo) || {};
-    var sessions = f1Sessions(race);
-    var now = Date.now();
-    var first = sessions[0];
-    var last = sessions[sessions.length - 1];
-    var lastEnd = last ? last.ms + (F1_SESSION_MS[last.label] || 0) : 0;
-    var live = !!(first && last && now >= first.ms && now <= lastEnd);
-    var justFinished = !!finished || !!(last && now > lastEnd);
-    var place = [loc.locality, loc.country].filter(Boolean).join(', ');
-    var circuitLine = [circuit.circuitName, place].filter(Boolean).join(' · ');
-    var raceWhen = f1ParseWhen({ date: race.date, time: race.time });
-    var cards = [];
-    cards.push({
-      tag: race.round ? ('R' + race.round) : 'GP',
-      headline: cmo.title || race.raceName || 'Grand Prix',
-      snippet: circuitLine || 'Race weekend',
-      meta: raceWhen ? ('Race · ' + f1FormatLocal(raceWhen)) : meta,
-      url: href,
-      topic: race.round ? ('r' + race.round) : 'gp'
-    });
-    if (sessions.length) {
-      cards.push({
-        tag: 'Sessions',
-        headline: 'Weekend timetable',
-        snippet: sessions.map(function (s) { return s.label + ' ' + f1FormatLocal(s.when); }).join(' · '),
-        meta: meta,
-        url: href,
-        topic: 'sessions'
-      });
-    }
-    var nextSess = null;
-    for (var s = 0; s < sessions.length; s++) {
-      var end = sessions[s].ms + (F1_SESSION_MS[sessions[s].label] || 0);
-      if (now < end) { nextSess = sessions[s]; break; }
-    }
-    var stateSnip;
-    if (cmo.next && !justFinished) {
-      stateSnip = cmo.next;
-    } else if (justFinished) {
-      stateSnip = (race.raceName || 'This race') + ' is in the books.';
-    } else if (nextSess) {
-      stateSnip = (now >= nextSess.ms ? nextSess.label + ' is on · ' : nextSess.label + ' · ') + f1FormatLocal(nextSess.when);
-    } else {
-      stateSnip = raceWhen ? ('Race · ' + f1FormatLocal(raceWhen)) : 'Race weekend';
-    }
-    var stateHead = justFinished
-      ? 'Just finished'
-      : (cmo.state || (live ? 'Weekend is live' : 'Next up'));
-    cards.push({
-      tag: justFinished ? 'Finished' : (live ? 'Live' : 'Next'),
-      headline: stateHead,
-      snippet: stateSnip,
-      meta: meta,
-      url: href,
-      topic: justFinished ? 'finished' : (live ? 'live' : 'next')
-    });
-    return cards;
-  }
-
-  function fetchF1Json(url) {
-    return fetch(url).then(function (res) {
-      if (!res.ok) throw new Error('jolpica ' + res.status);
-      return res.json();
-    });
-  }
-
-  function openf1Url(path) {
-    var base = String(railCfg().openf1 || 'https://api.openf1.org/v1').replace(/\/+$/, '');
-    return base + path;
-  }
-
-  function fetchOpenF1Json(path) {
-    function once(retried) {
-      return fetch(openf1Url(path)).then(function (res) {
-        if (res.status === 429 && !retried) {
-          return new Promise(function (resolve) {
-            setTimeout(function () { resolve(once(true)); }, 1000);
-          });
-        }
-        if (res.status === 401 || res.status === 403) return null;
-        if (!res.ok) return null;
-        return res.json();
-      }).then(function (data) {
-        return Array.isArray(data) && data.length ? data : null;
-      }).catch(function () {
-        return null;
-      });
-    }
-    return once(false);
-  }
-
-  function f1ParseIso(s) {
-    if (!s) return null;
-    var d = new Date(s);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  function f1OpenF1Tag(sess) {
-    var raw = String((sess && (sess.session_name || sess.session_type)) || '');
-    if (/practice\s*1/i.test(raw) || /^fp1$/i.test(raw)) return 'FP1';
-    if (/practice\s*2/i.test(raw) || /^fp2$/i.test(raw)) return 'FP2';
-    if (/practice\s*3/i.test(raw) || /^fp3$/i.test(raw)) return 'FP3';
-    if (/sprint\s*qual/i.test(raw) || /shootout/i.test(raw)) return 'Sprint Quali';
-    if (/sprint/i.test(raw)) return 'Sprint';
-    if (/qual/i.test(raw)) return 'Quali';
-    if (/race/i.test(raw)) return 'Race';
-    return raw || 'Session';
-  }
-
-  function f1FormatDuration(duration) {
-    if (duration == null || duration === '') return '';
-    if (Object.prototype.toString.call(duration) === '[object Array]') {
-      var last = null;
-      var i;
-      for (i = duration.length - 1; i >= 0; i--) {
-        if (duration[i] != null && duration[i] !== '') { last = duration[i]; break; }
-      }
-      return f1FormatDuration(last);
-    }
-    if (typeof duration === 'string') {
-      var trimmed = duration.replace(/^\s+|\s+$/g, '');
-      if (!trimmed) return '';
-      if (/lap/i.test(trimmed)) return trimmed;
-      if (trimmed.indexOf(':') !== -1) return trimmed;
-      var parsed = parseFloat(trimmed);
-      if (isNaN(parsed)) return trimmed;
-      duration = parsed;
-    }
-    if (typeof duration !== 'number' || !isFinite(duration)) return '';
-    var sign = duration < 0 ? '-' : '';
-    var abs = Math.abs(duration);
-    var mins = Math.floor(abs / 60);
-    var secs = abs - mins * 60;
-    var secStr = secs.toFixed(3);
-    if (secs < 10) secStr = '0' + secStr;
-    return sign + mins + ':' + secStr;
-  }
-
-  function f1FormatGap(gap) {
-    if (gap == null || gap === '') return '';
-    if (Object.prototype.toString.call(gap) === '[object Array]') {
-      var lastGap = null;
-      var gi;
-      for (gi = gap.length - 1; gi >= 0; gi--) {
-        if (gap[gi] != null && gap[gi] !== '') { lastGap = gap[gi]; break; }
-      }
-      return f1FormatGap(lastGap);
-    }
-    if (typeof gap === 'string') {
-      var g = gap.replace(/^\s+|\s+$/g, '');
-      if (!g || /^0+(\.0+)?$/.test(g)) return '';
-      if (/lap/i.test(g)) return g.charAt(0) === '+' ? g : ('+' + g);
-      if (g.charAt(0) === '+') return g;
-      var n = parseFloat(g);
-      if (isNaN(n)) return g;
-      gap = n;
-    }
-    if (typeof gap !== 'number' || !isFinite(gap) || gap === 0) return '';
-    return (gap < 0 ? '-' : '+') + Math.abs(gap).toFixed(3);
-  }
-
-  function f1DriverLabel(drv) {
-    if (!drv) return '';
-    var acr = String(drv.name_acronym || '').replace(/^\s+|\s+$/g, '');
-    if (acr) return acr;
-    var last = String(drv.last_name || '').replace(/^\s+|\s+$/g, '');
-    if (last) return last;
-    if (drv.driver_number != null) return String(drv.driver_number);
-    return '';
-  }
-
-  function f1Top3Line(results, drivers) {
-    var byNum = {};
-    var i;
-    if (drivers) {
-      for (i = 0; i < drivers.length; i++) {
-        var d = drivers[i];
-        if (d && d.driver_number != null) byNum[String(d.driver_number)] = d;
-      }
-    }
-    var rows = (results || []).slice();
-    rows.sort(function (a, b) {
-      return (Number(a && a.position) || 99) - (Number(b && b.position) || 99);
-    });
-    var parts = [];
-    for (i = 0; i < rows.length && parts.length < 3; i++) {
-      var row = rows[i];
-      if (!row) continue;
-      var label = f1DriverLabel(byNum[String(row.driver_number)]) || String(row.driver_number || '');
-      if (!label) continue;
-      if (parts.length === 0) {
-        var time = f1FormatDuration(row.duration);
-        if (!time) continue;
-        parts.push(label + ' ' + time);
-      } else {
-        var gap = f1FormatGap(row.gap_to_leader);
-        if (gap) parts.push(label + ' ' + gap);
-        else {
-          var fallback = f1FormatDuration(row.duration);
-          if (fallback) parts.push(label + ' ' + fallback);
-        }
-      }
-    }
-    return parts.join(' · ');
-  }
-
-  function f1SessionRank(item) {
-    var tag = (item && item.tag) || '';
-    if (tag === 'Race') return 80;
-    if (tag === 'Quali') return 70;
-    if (tag === 'Sprint') return 60;
-    if (tag === 'Sprint Quali') return 50;
-    if (tag === 'FP3') return 30;
-    if (tag === 'FP2') return 20;
-    if (tag === 'FP1') return 10;
-    return 0;
-  }
-
-  function f1SessionUsable(item, now) {
-    if (!item) return false;
-    if (item.endMs < now) return true;
-    if (item.startMs <= now) return true;
-    return false;
-  }
-
-  function f1PickResultSession(list, now, preferKey) {
-    var latestCompleted = null;
-    var quali = null;
-    var race = null;
-    var pinned = null;
-    var i;
-    for (i = 0; i < list.length; i++) {
-      var item = list[i];
-      var key = item.raw && item.raw.session_key;
-      if (preferKey != null && String(key) === String(preferKey)) pinned = item;
-      if (item.tag === 'Quali') quali = item;
-      if (item.tag === 'Race') race = item;
-      if (item.endMs < now) latestCompleted = item;
-    }
-    var pick = latestCompleted;
-    if (quali && f1SessionUsable(quali, now)) pick = quali;
-    if (race && f1SessionUsable(race, now)) pick = race;
-    if (pinned && f1SessionUsable(pinned, now)) {
-      if (!pick || f1SessionRank(pinned) >= f1SessionRank(pick)) pick = pinned;
-    }
-    if (latestCompleted && (!pick || f1SessionRank(latestCompleted) > f1SessionRank(pick))) {
-      pick = latestCompleted;
-    }
-    return pick;
-  }
-
-  function overlayOpenF1Cards(cards, cfg) {
-    if (!cards || !cards.length) return Promise.resolve(cards);
-    var pinnedKey = cfg && cfg.openf1SessionKey;
-    var latestP = fetchOpenF1Json('/sessions?session_key=latest');
-    var pinnedP = pinnedKey != null
-      ? fetchOpenF1Json('/sessions?session_key=' + encodeURIComponent(pinnedKey))
-      : Promise.resolve(null);
-    return Promise.all([latestP, pinnedP]).then(function (pair) {
-      var latestSess = pair[0] && pair[0][0];
-      var pinnedSess = pair[1] && pair[1][0];
-      var meetingKey = latestSess && latestSess.meeting_key;
-      if (meetingKey == null && pinnedSess) meetingKey = pinnedSess.meeting_key;
-      if (meetingKey == null) return cards;
-      var preferKey = null;
-      if (pinnedSess && pinnedSess.meeting_key == meetingKey) preferKey = pinnedSess.session_key;
-      else if (pinnedKey != null && latestSess && latestSess.meeting_key == meetingKey) preferKey = pinnedKey;
-      return fetchOpenF1Json('/sessions?meeting_key=' + encodeURIComponent(meetingKey)).then(function (sessions) {
-        if (!sessions || !sessions.length) return cards;
-        var now = Date.now();
-        var list = [];
-        var i;
-        for (i = 0; i < sessions.length; i++) {
-          var s = sessions[i];
-          if (!s || s.is_cancelled) continue;
-          var start = f1ParseIso(s.date_start);
-          var end = f1ParseIso(s.date_end);
-          if (!start || !end) continue;
-          list.push({
-            raw: s,
-            tag: f1OpenF1Tag(s),
-            start: start,
-            startMs: start.getTime(),
-            endMs: end.getTime()
-          });
-        }
-        list.sort(function (a, b) { return a.startMs - b.startMs; });
-        var completed = f1PickResultSession(list, now, preferKey);
-        var live = null;
-        var upcoming = null;
-        for (i = 0; i < list.length; i++) {
-          var item = list[i];
-          if (item.startMs <= now && item.endMs > now) live = item;
-          else if (item.startMs > now && !upcoming) upcoming = item;
-        }
-        if (completed && live && completed.raw && live.raw &&
-            String(completed.raw.session_key) === String(live.raw.session_key)) {
-          live = null;
-        }
-        var resultKey = completed && completed.raw.session_key;
-        var resultP = resultKey != null
-          ? fetchOpenF1Json('/session_result?session_key=' + encodeURIComponent(resultKey))
-          : Promise.resolve(null);
-        return resultP.then(function (results) {
-          var driversP = (resultKey != null && results)
-            ? fetchOpenF1Json('/drivers?session_key=' + encodeURIComponent(resultKey))
-            : Promise.resolve(null);
-          return driversP.then(function (drivers) {
-            var out = cards.slice();
-            var href = (cards[0] && cards[0].url) || '';
-            var meta = (cfg && cfg.meta) || 'Live · race weekend';
-            var cmo = (cfg && cfg.cmo) || {};
-            if (completed && results && results.length) {
-              var line = f1Top3Line(results, drivers);
-              if (line) {
-                out[1] = {
-                  tag: completed.tag,
-                  headline: line,
-                  snippet: completed.tag + ' result · OpenF1 historical' +
-                    (resultKey != null ? ' ' + resultKey : ''),
-                  meta: meta,
-                  url: href,
-                  topic: topicFollowSlug(completed.tag) || 'result'
-                };
-              }
-            }
-            var stateCard;
-            if (live) {
-              stateCard = {
-                tag: 'Live',
-                headline: live.tag + ' is on',
-                snippet: live.tag + ' is on · ' + f1FormatLocal(live.start),
-                meta: meta,
-                url: href,
-                topic: 'live'
-              };
-            } else if (upcoming) {
-              stateCard = {
-                tag: 'Next',
-                headline: cmo.state || 'Next up',
-                snippet: cmo.next || (upcoming.tag + ' · ' + f1FormatLocal(upcoming.start)),
-                meta: meta,
-                url: href,
-                topic: 'next'
-              };
-            } else {
-              var finished = !!(completed && !live && !upcoming);
-              var snip = cmo.next
-                ? cmo.next
-                : (finished ? 'This race is in the books.' : ((out[2] && out[2].snippet) || 'Race weekend'));
-              stateCard = {
-                tag: finished ? 'Finished' : ((out[2] && out[2].tag) || 'Next'),
-                headline: finished ? 'Just finished' : (cmo.state || (out[2] && out[2].headline) || 'Next up'),
-                snippet: snip,
-                meta: meta,
-                url: href,
-                topic: finished ? 'finished' : 'next'
-              };
-            }
-            if (out.length >= 3) out[2] = stateCard;
-            else out.push(stateCard);
-            return out;
-          });
-        });
-      });
-    }).catch(function () {
-      return cards;
-    });
-  }
-
-  function fetchF1Cards() {
-    var cfg = railCfg();
-    var nextUrl = cfg.endpoint || 'https://api.jolpi.ca/ergast/f1/current/next.json';
-    var lastUrl = /\/next\.json/i.test(nextUrl)
-      ? nextUrl.replace(/\/next\.json/i, '/last.json')
-      : 'https://api.jolpi.ca/ergast/f1/current/last.json';
-    function fromLast() {
-      return fetchF1Json(lastUrl).then(function (data) {
-        var race = f1RaceFromPayload(data);
-        if (!race) throw new Error('jolpica last empty');
-        return f1CardsFromRace(race, cfg, true);
-      });
-    }
-    return fetchF1Json(nextUrl).then(function (data) {
-      var race = f1RaceFromPayload(data);
-      if (!race) return fromLast();
-      return f1CardsFromRace(race, cfg, false);
-    }).catch(function (err) {
-      return fromLast().catch(function () { throw err; });
-    }).then(function (cards) {
-      if (!cards || !cards.length) throw new Error('jolpica empty');
-      return overlayOpenF1Cards(cards, cfg);
-    });
+  function fetchF1Cards() { // factory-gp.js
+    if (PLUGIN.fetchF1Cards) return PLUGIN.fetchF1Cards.apply(null, arguments);
+    return Promise.reject(new Error('factory-gp.js not loaded'));
   }
 
   function fallbackTrendCards() {
@@ -4241,45 +3243,9 @@
     return porchOn ? Math.max(1, max - 1) : max;
   }
 
-  function stalePreRaceCard(card) {
-    if (!card) return false;
-    var tag = String(card.tag || '');
-    var head = String(card.headline || '');
-    var snip = String(card.snippet || '');
-    var blob = head + ' ' + snip;
-    if (/^FP2$/i.test(tag)) return true;
-    if (/1:33\.662/.test(head) || /Antonelli tops FP2/i.test(head)) return true;
-    if (/1:22\.559/.test(head) && /Lec|Ant/i.test(head)) return true;
-    if (/Russell/i.test(head) && /1:22/.test(head) && !/pole|P2/i.test(head)) return true;
-    if (/FP2/i.test(snip) && /Russell/i.test(head + snip) && !/pole/i.test(head)) return true;
-    if (/^Grid$/i.test(tag) && /PU|Monza|Gasly/i.test(blob)) return true;
-    if (/^Quali$/i.test(tag) && /Monza|Gasly|yellow-flag lottery/i.test(blob)) return true;
-    if (/Gasly P1/i.test(head) || /Gasly pole/i.test(head)) return true;
-    if (/Race Sun 7:00/i.test(blob) && !/57 laps/i.test(blob)) return true;
-    if (/back(\s+of\s+the)?\s+(the\s+)?grid|back row|→ back/i.test(blob) && /PU/i.test(blob)) return true;
-    if (/OpenF1 11357|session_key 11357/i.test(blob)) return true;
-    return false;
-  }
-
-  function mergeF1Rail(cards, extra) {
-    var max = railNwsSlots();
-    var pins = [];
-    var i;
-    extra = extra || [];
-    for (i = 0; i < extra.length; i++) {
-      if (!stalePreRaceCard(extra[i])) pins.push(extra[i]);
-    }
-    if (pins.length >= max) return pins.slice(0, max);
-    var live = [];
-    if (cards && cards.length) {
-      if (cards[1] && !stalePreRaceCard(cards[1])) live.push(cards[1]);
-      if (cards[2] && !stalePreRaceCard(cards[2])) live.push(cards[2]);
-      if (cards[0] && pins.length === 0) live.push(cards[0]);
-    }
-    var out = pins.slice();
-    for (i = 0; i < live.length && out.length < max; i++) out.push(live[i]);
-    if (!out.length) return (cards || []).slice(0, max);
-    return out.slice(0, max);
+  function mergeF1Rail(cards, extra) { // factory-gp.js
+    if (PLUGIN.mergeF1Rail) return PLUGIN.mergeF1Rail.apply(null, arguments);
+    return (cards || []).concat(extra || []);
   }
 
   var f1RefreshTimer = null;
@@ -4460,9 +3426,8 @@
       var extra = outboundCards();
       var merged;
       if (railKind() === 'f1-calendar') {
-        merged = mergeF1Rail(cards, extra);                                   // gpchat (F1 rail)
+        merged = mergeF1Rail(cards, extra);
       } else if (railCfg().liveKeep === true) {
-        // samochat: forecast/outbound first, keep at least one live card (was samochat-only code)
         var slots = railNwsSlots();
         var liveKeep = Math.max(0, slots - extra.length);
         if (!liveKeep && (cards || []).length) liveKeep = 1;
@@ -4471,7 +3436,7 @@
           : (cards || []).slice(0, liveKeep).concat(extra);
         if (merged.length) { commitRail(merged); return; }
       } else if (railKind() === 'nws-forecast' || railKind() === 'bart-bsa') {
-        merged = (extra || []).concat(cards || []);                           // 415/808 (nws-forecast), bartchat (bart-bsa): pinned first
+        merged = (extra || []).concat(cards || []);
       } else {
         merged = (cards || []).concat(extra);
       }
@@ -4558,7 +3523,7 @@
     var posts = livePosts || [];
     for (i = 0; i < posts.length; i++) {
       var post = posts[i];
-      if (!post || post.parentId) continue;
+      if (!post || post.parentId || isPostHidden(post)) continue;
       var opt = porchOptionFromText(post.text);
       if (opt && Object.prototype.hasOwnProperty.call(counts, opt)) counts[opt] += 1;
     }
@@ -4653,9 +3618,7 @@
   function renderExplore() {
     function cards(list) {
       return list.map(function (c) {
-        const inner = '<div class="explore-card-tag">' + escapeHtml(c.tag) + '</div>' +
-          '<div class="explore-card-title">' + escapeHtml(c.title) + '</div>' +
-          '<div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div>';
+        const inner = '<div class="explore-card-tag">' + escapeHtml(c.tag) + '</div><div class="explore-card-title">' + escapeHtml(c.title) + '</div><div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div>';
         if (c.url) {
           return '<a class="explore-card" href="' + c.url + '" target="_blank" rel="noopener noreferrer">' + inner + '</a>';
         }
@@ -4710,7 +3673,7 @@
   }
 
   function siteNotifs() {
-    return notifItems.filter(function (n) { return !n.siteId || n.siteId === SITE_ID; });
+    return notifItems.filter(function (n) { return (!n.siteId || n.siteId === SITE_ID) && !(n.postId && hiddenIds[n.postId] && n.type !== 'report' && n.type !== 'report_update'); });
   }
 
   function unreadNotifCount() {
@@ -4751,10 +3714,7 @@
     syncNotifChrome();
     if (!el) return;
     if (!notifsLive()) {
-      el.innerHTML = '<div class="soon-panel">' +
-        '<strong>Notifications — Soon.</strong>' +
-        '<p>No live alerts in this preview. Dummy copy stays in site.json as sample only and is not shown as real activity.</p>' +
-        '</div>';
+      el.innerHTML = '<div class="soon-panel"><strong>Notifications — Soon.</strong><p>No live alerts in this preview. Dummy copy stays in site.json as sample only and is not shown as real activity.</p></div>';
       return;
     }
     var list = siteNotifs();
@@ -4767,9 +3727,7 @@
     }
     el.innerHTML = list.map(function (n) {
       return '<button type="button" class="notif-item' + (n.read ? '' : ' unread') + '" data-notif-id="' + escapeHtml(n.id) + '" data-notif-type="' + escapeHtml(n.type || '') + '"' +
-        (n.postId ? ' data-post-id="' + escapeHtml(n.postId) + '"' : '') + '>' +
-        '<p>' + escapeHtml(notifLine(n)) + '</p>' +
-        '<time>' + escapeHtml(notifWhen(n.ms)) + '</time></button>';
+        (n.postId ? ' data-post-id="' + escapeHtml(n.postId) + '"' : '') + '><p>' + escapeHtml(notifLine(n)) + '</p><time>' + escapeHtml(notifWhen(n.ms)) + '</time></button>';
     }).join('');
   }
 
@@ -4924,13 +3882,13 @@
 
   function sendNotif(to, type, postId, text, id) {
     var me = liveUid();
-    if (!me || !fbDb || !to || to === me || !isEmailVerified()) return;
+    if (!me || !fbDb || !to || to === me || !isEmailVerified()) return Promise.resolve(false);
     var p = { toUid: to, fromUid: me, type: type, siteId: SITE_ID, read: false, createdAt: firebase.firestore.FieldValue.serverTimestamp() };
     if (postId) p.postId = postId;
     text = String(text || '').trim().slice(0, 180);
     if (text) p.text = text;
     var c = fbDb.collection('users').doc(to).collection('notifications');
-    (id ? c.doc(id).set(p) : c.add(p)).catch(function (e) { console.warn(type + ' notif', e); });
+    return (id ? c.doc(id).set(p) : c.add(p)).then(function () { return true; }).catch(function (e) { console.warn(type + ' notif', e); return false; });
   }
   function writeMentionNotifs(text, postId, skip) {
     var seen = {}, n = 0;
@@ -5011,17 +3969,7 @@
     var st = document.createElement('style');
     st.id = 'dm-css';
     st.textContent =
-      '.post-name-link{cursor:pointer;}' +
-      '.post-name-link:hover{text-decoration:underline;}' +
-      '.thread-unread{display:inline-block;margin-left:0.35rem;min-width:1.1rem;padding:0.05rem 0.35rem;border-radius:999px;background:var(--accent,#e10600);color:#fff;font-size:0.68rem;font-weight:700;text-align:center;}' +
-      '#chat-compose-err{padding:0.35rem 1rem 0;font-size:0.8rem;color:var(--accent,#e10600);}' +
-      '.chat-user-picker{position:absolute;inset:12px;z-index:4;background:var(--surface,#1c1c20);border:1px solid var(--border,#2c2c32);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;}' +
-      '.chat-user-picker[hidden]{display:none!important;}' +
-      '.chat-user-picker-head{display:flex;align-items:center;justify-content:space-between;padding:0.85rem 1rem;border-bottom:1px solid var(--border,#2c2c32);font-weight:700;}' +
-      '.chat-user-picker-head button{background:none;border:0;color:inherit;font-size:1.2rem;cursor:pointer;}' +
-      '.chat-picker-item{display:flex;gap:0.7rem;align-items:center;padding:0.75rem 1rem;cursor:pointer;border-bottom:1px solid var(--border,#2c2c32);}' +
-      '.chat-picker-item:hover{background:rgba(225,6,0,0.08);}' +
-      '#chat-thread-view[hidden],#chat-placeholder[hidden],#chat-user-picker[hidden],#profile-message-btn[hidden],#profile-follow-btn[hidden]{display:none!important;}';
+      '.post-name-link{cursor:pointer;}.post-name-link:hover{text-decoration:underline;}.thread-unread{display:inline-block;margin-left:0.35rem;min-width:1.1rem;padding:0.05rem 0.35rem;border-radius:999px;background:var(--accent,#e10600);color:#fff;font-size:0.68rem;font-weight:700;text-align:center;}#chat-compose-err{padding:0.35rem 1rem 0;font-size:0.8rem;color:var(--accent,#e10600);}.chat-user-picker{position:absolute;inset:12px;z-index:4;background:var(--surface,#1c1c20);border:1px solid var(--border,#2c2c32);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;}.chat-user-picker[hidden]{display:none!important;}.chat-user-picker-head{display:flex;align-items:center;justify-content:space-between;padding:0.85rem 1rem;border-bottom:1px solid var(--border,#2c2c32);font-weight:700;}.chat-user-picker-head button{background:none;border:0;color:inherit;font-size:1.2rem;cursor:pointer;}.chat-picker-item{display:flex;gap:0.7rem;align-items:center;padding:0.75rem 1rem;cursor:pointer;border-bottom:1px solid var(--border,#2c2c32);}.chat-picker-item:hover{background:rgba(225,6,0,0.08);}#chat-thread-view[hidden],#chat-placeholder[hidden],#chat-user-picker[hidden],#profile-message-btn[hidden],#profile-follow-btn[hidden]{display:none!important;}';
     document.head.appendChild(st);
   }
 
@@ -5198,17 +4146,11 @@
     const el = document.getElementById('chat-thread-list');
     if (!el) return;
     if (!dmsOn()) {
-      el.innerHTML = '<div class="soon-panel soon-panel-pad">' +
-        '<strong>Chat — Soon.</strong>' +
-        '<p>Direct messages are not live. Sample thread copy in site.json is not a real inbox.</p>' +
-        '</div>';
+      el.innerHTML = '<div class="soon-panel soon-panel-pad"><strong>Chat — Soon.</strong><p>Direct messages are not live. Sample thread copy in site.json is not a real inbox.</p></div>';
       return;
     }
     if (!isLiveUser()) {
-      el.innerHTML = '<div class="soon-panel soon-panel-pad">' +
-        '<strong>Join to chat.</strong>' +
-        '<p>Sign in to send and receive direct messages. Guest cannot chat.</p>' +
-        '</div>';
+      el.innerHTML = '<div class="soon-panel soon-panel-pad"><strong>Join to chat.</strong><p>Sign in to send and receive direct messages. Guest cannot chat.</p></div>';
       return;
     }
     var q = ((document.getElementById('chat-search-input') || {}).value || '').trim().toLowerCase();
@@ -5219,9 +4161,7 @@
       return name.indexOf(q) !== -1 || prev.indexOf(q) !== -1;
     });
     if (!list.length) {
-      el.innerHTML = '<div class="soon-panel soon-panel-pad">' +
-        '<strong>' + (dmConversations.length ? 'No matches.' : 'No messages yet.') + '</strong>' +
-        '</div>';
+      el.innerHTML = '<div class="soon-panel soon-panel-pad"><strong>' + (dmConversations.length ? 'No matches.' : 'No messages yet.') + '</strong></div>';
       return;
     }
     var me = liveUid();
@@ -5229,9 +4169,7 @@
       var name = convPeerName(c);
       var unread = (c.unreadCounts && me && c.unreadCounts[me]) || 0;
       var handle = String(name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
-      return '<div class="chat-thread-item' + (c.id === activeConvId ? ' active' : '') + '" data-cid="' + escapeHtml(c.id) + '">' +
-        '<div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(name) + '</div>' +
-        '<div><div class="thread-name">' + escapeHtml(name) +
+      return '<div class="chat-thread-item' + (c.id === activeConvId ? ' active' : '') + '" data-cid="' + escapeHtml(c.id) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(name) + '</div><div><div class="thread-name">' + escapeHtml(name) +
           (unread ? '<span class="thread-unread">' + escapeHtml(String(unread)) + '</span>' : '') +
         '</div><div class="thread-preview">' + escapeHtml(c.lastMessage || '') + '</div></div></div>';
     }).join('');
@@ -5312,102 +4250,102 @@
   }
 
   function sendDm() {
-    if (dmSendInFlight) return;
-    if (!dmsOn()) return;
-    if (!requireVerified('chat')) return;
-    var input = document.getElementById('chat-compose-input');
-    var text = ((input && input.value) || '').replace(/\s+/g, ' ').trim();
-    if (!text) return;
-    if (text.length > DM_TEXT_MAX) text = text.slice(0, DM_TEXT_MAX);
-    var me = liveUid();
-    var conv = findConv(activeConvId);
-    var other = (pendingPeer && pendingPeer.uid) || (conv && convPeerUid(conv)) || '';
-    if (!me || !other || other === me) {
-      chatErr(!me ? 'Sign in to send a message.' : 'Pick who to message first.');
-      return;
-    }
-    if (blockedUids[other]) {
-      chatErr('You blocked this user.');
-      return;
-    }
-    if (!fbDb) { chatErr('Chat is not connected.'); return; }
-    if (msgCooldownMs() > 0) {
-      chatErr('Wait ' + Math.ceil(msgCooldownMs() / 1000) + 's before another message.');
-      return;
-    }
-    if (!isAdminUser() && !spamFree(text)) {
-      chatErr('That message is blocked by the room spam filter.');
-      return;
-    }
-    var peerName = dmDisplayName((pendingPeer && pendingPeer.name) || (conv && convPeerName(conv)) || 'Member');
-    var myName = myDisplayName();
-    var cid = convIdFor(me, other);
-    var convRef = fbDb.collection('conversations').doc(cid);
-    var msgRef = convRef.collection('messages').doc();
-    var sendBtn = document.getElementById('chat-send-btn');
-    dmSendInFlight = true;
-    if (sendBtn) sendBtn.disabled = true;
-    chatErr('');
-    convRef.get().then(function (snap) {
-      var names = {};
-      names[me] = myName;
-      names[other] = peerName;
-      var unread = {};
-      unread[me] = 0;
-      unread[other] = 1;
-      var batch = fbDb.batch();
-      if (snap.exists) {
-        var d = snap.data() || {};
-        var existingNames = d.participantNames || {};
-        names[me] = myName || dmDisplayName(existingNames[me]);
-        names[other] = dmDisplayName(existingNames[other]) !== 'Member' ? dmDisplayName(existingNames[other]) : peerName;
-        var prev = d.unreadCounts || {};
-        unread[other] = (typeof prev[other] === 'number' ? prev[other] : 0) + 1;
-        batch.update(convRef, {
-          lastMessage: text,
-          lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
-          lastMessageBy: me,
-          unreadCounts: unread,
-          participantNames: names
-        });
-      } else {
-        batch.set(convRef, {
-          siteId: dmSiteId(),
-          participants: [me, other],
-          participantNames: names,
-          lastMessage: text,
-          lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
-          lastMessageBy: me,
-          unreadCounts: unread,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-      }
-      batch.set(msgRef, {
-        fromUid: me,
-        text: text,
-        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-        siteId: dmSiteId()
-      });
-      batch.set(fbDb.collection('rateLimits').doc(me), {
-        lastMsgAt: firebase.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-      return batch.commit();
-    }).then(function () {
-      noteMsgCommitted();
-      if (input) {
-        input.value = '';
-        input.style.height = 'auto';
-      }
-      activeConvId = cid;
-      listenMessages(cid);
-      chatErr('');
-    }).catch(function (e) {
-      chatErr(guardPublicErr(e, 'Could not send.', 'dm'));
-    }).finally(function () {
-      dmSendInFlight = false;
-      if (sendBtn) sendBtn.disabled = false;
-      syncChatChrome();
-    });
+   if (dmSendInFlight) return;
+   if (!dmsOn()) return;
+   if (!requireVerified('chat')) return;
+   var input = document.getElementById('chat-compose-input');
+   var text = ((input && input.value) || '').replace(/\s+/g, ' ').trim();
+   if (!text) return;
+   if (text.length > DM_TEXT_MAX) text = text.slice(0, DM_TEXT_MAX);
+   var me = liveUid();
+   var conv = findConv(activeConvId);
+   var other = (pendingPeer && pendingPeer.uid) || (conv && convPeerUid(conv)) || '';
+   if (!me || !other || other === me) {
+     chatErr(!me ? 'Sign in to send a message.' : 'Pick who to message first.');
+     return;
+   }
+   if (blockedUids[other]) {
+     chatErr('You blocked this user.');
+     return;
+   }
+   if (!fbDb) { chatErr('Chat is not connected.'); return; }
+   if (msgCooldownMs() > 0) {
+     chatErr('Wait ' + Math.ceil(msgCooldownMs() / 1000) + 's before another message.');
+     return;
+   }
+   if (!isAdminUser() && !spamFree(text)) {
+     chatErr('That message is blocked by the room spam filter.');
+     return;
+   }
+   var peerName = dmDisplayName((pendingPeer && pendingPeer.name) || (conv && convPeerName(conv)) || 'Member');
+   var myName = myDisplayName();
+   var cid = convIdFor(me, other);
+   var convRef = fbDb.collection('conversations').doc(cid);
+   var msgRef = convRef.collection('messages').doc();
+   var sendBtn = document.getElementById('chat-send-btn');
+   dmSendInFlight = true;
+   if (sendBtn) sendBtn.disabled = true;
+   chatErr('');
+   convRef.get().then(function (snap) {
+     var names = {};
+     names[me] = myName;
+     names[other] = peerName;
+     var unread = {};
+     unread[me] = 0;
+     unread[other] = 1;
+     var batch = fbDb.batch();
+     if (snap.exists) {
+       var d = snap.data() || {};
+       var existingNames = d.participantNames || {};
+       names[me] = myName || dmDisplayName(existingNames[me]);
+       names[other] = dmDisplayName(existingNames[other]) !== 'Member' ? dmDisplayName(existingNames[other]) : peerName;
+       var prev = d.unreadCounts || {};
+       unread[other] = (typeof prev[other] === 'number' ? prev[other] : 0) + 1;
+       batch.update(convRef, {
+         lastMessage: text,
+         lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
+         lastMessageBy: me,
+         unreadCounts: unread,
+         participantNames: names
+       });
+     } else {
+       batch.set(convRef, {
+         siteId: dmSiteId(),
+         participants: [me, other],
+         participantNames: names,
+         lastMessage: text,
+         lastMessageAt: firebase.firestore.FieldValue.serverTimestamp(),
+         lastMessageBy: me,
+         unreadCounts: unread,
+         createdAt: firebase.firestore.FieldValue.serverTimestamp()
+       });
+     }
+     batch.set(msgRef, {
+       fromUid: me,
+       text: text,
+       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+       siteId: dmSiteId()
+     });
+     batch.set(fbDb.collection('rateLimits').doc(me), {
+       lastMsgAt: firebase.firestore.FieldValue.serverTimestamp()
+     }, { merge: true });
+     return batch.commit();
+   }).then(function () {
+     noteMsgCommitted();
+     if (input) {
+       input.value = '';
+       input.style.height = 'auto';
+     }
+     activeConvId = cid;
+     listenMessages(cid);
+     chatErr('');
+   }).catch(function (e) {
+     chatErr(guardPublicErr(e, 'Could not send.', 'dm'));
+   }).finally(function () {
+     dmSendInFlight = false;
+     if (sendBtn) sendBtn.disabled = false;
+     syncChatChrome();
+   });
   }
 
   function hideDmPicker() {
@@ -5421,7 +4359,7 @@
       return;
     }
     if (liveUid() !== ADMIN_UID) {
-      chatErr('Welcome sends need the factory admin Google (jebb.dykstra@gmail.com). This signed-in account is not that admin.');
+      chatErr('Welcome sends require the factory admin account. This signed-in account is not that admin.');
       return;
     }
     if (!requireVerified('chat')) return;
@@ -5456,9 +4394,7 @@
       }
       list.innerHTML = rows.map(function (u) {
         var handle = String(u.name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
-        return '<div class="chat-picker-item" data-pick-uid="' + escapeHtml(u.uid) + '" data-pick-name="' + escapeHtml(u.name) + '">' +
-          '<div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(u.name) + '</div>' +
-          '<div class="thread-name">' + escapeHtml(u.name) + '</div></div>';
+        return '<div class="chat-picker-item" data-pick-uid="' + escapeHtml(u.uid) + '" data-pick-name="' + escapeHtml(u.name) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(u.name) + '</div><div class="thread-name">' + escapeHtml(u.name) + '</div></div>';
       }).join('');
     }).catch(function (e) {
       if (list) list.innerHTML = '<div class="soon-panel">' + escapeHtml((e && e.message) || 'Could not list users.') + '</div>';
@@ -5529,7 +4465,7 @@
     if (b) b.textContent = bio || '';
     const pane = document.getElementById('profile-pane-posts');
     if (!pane) return;
-    const mine = livePosts.filter(function (p) { return p.authorUid && p.authorUid === uid; });
+    const mine = livePosts.filter(function (p) { return p.authorUid && p.authorUid === uid && !isPostHidden(p); });
     if (!mine.length) {
       pane.innerHTML = '<div class="empty-note" id="profile-posts-empty">' + escapeHtml(skin('profileEmpty', (site && site.emptyState) || 'No posts yet.')) + '</div>';
     } else {
@@ -5585,23 +4521,14 @@
     if (!el) return;
     if (isLiveUser() && currentUser && currentUser.live) {
       el.innerHTML =
-        '<div class="sidebar-auth-user">' +
-          '<div class="sidebar-auth-avatar">' + initials(currentUser.name) + '</div>' +
-          '<div class="sidebar-auth-name">@' + escapeHtml(currentUser.handle) + '</div>' +
-        '</div>' +
-        '<button class="sidebar-auth-btn" id="auth-signout" type="button">Sign out</button>';
+        '<div class="sidebar-auth-user"><div class="sidebar-auth-avatar">' + initials(currentUser.name) + '</div><div class="sidebar-auth-name">@' + escapeHtml(currentUser.handle) + '</div></div><button class="sidebar-auth-btn" id="auth-signout" type="button">Sign out</button>';
       if (av) {
         av.textContent = initials(currentUser.name);
         av.style.background = colorFor(currentUser.handle);
       }
     } else if (currentUser && !currentUser.live) {
       el.innerHTML =
-        '<div class="sidebar-auth-user">' +
-          '<div class="sidebar-auth-avatar">' + initials(currentUser.name || 'G') + '</div>' +
-          '<div class="sidebar-auth-name">Guest · browse only</div>' +
-        '</div>' +
-        '<button class="sidebar-auth-btn primary" id="auth-signin" type="button">Sign in</button>' +
-        '<button class="sidebar-auth-btn" id="auth-signout" type="button">Leave guest</button>';
+        '<div class="sidebar-auth-user"><div class="sidebar-auth-avatar">' + initials(currentUser.name || 'G') + '</div><div class="sidebar-auth-name">Guest · browse only</div></div><button class="sidebar-auth-btn primary" id="auth-signin" type="button">Sign in</button><button class="sidebar-auth-btn" id="auth-signout" type="button">Leave guest</button>';
       if (av) {
         av.textContent = initials(currentUser.name || 'G');
         av.style.background = colorFor(currentUser.handle || 'guest');
@@ -5659,14 +4586,7 @@
     var st = document.createElement('style');
     st.id = 'join-auth-css';
     st.textContent =
-      '.conv-modal-tabs.is-join-hidden{display:none;}' +
-      '.conv-email-toggle{width:100%;padding:0.55rem;margin:0.15rem 0 0.35rem;' +
-        'background:transparent;border:1px solid var(--border,rgba(0,0,0,0.14));' +
-        'border-radius:50px;cursor:pointer;font-size:0.82rem;font-weight:600;' +
-        'color:var(--text-muted,#666);}' +
-      '.conv-email-toggle:hover{color:var(--text,#111);}' +
-      '.cv-email-signin{margin-top:0.2rem;}' +
-      '.conv-google-btn{margin-bottom:0.2rem;}';
+      '.conv-modal-tabs.is-join-hidden{display:none;}.conv-email-toggle{width:100%;padding:0.55rem;margin:0.15rem 0 0.35rem;background:transparent;border:1px solid var(--border,rgba(0,0,0,0.14));border-radius:50px;cursor:pointer;font-size:0.82rem;font-weight:600;color:var(--text-muted,#666);}.conv-email-toggle:hover{color:var(--text,#111);}.cv-email-signin{margin-top:0.2rem;}.conv-google-btn{margin-bottom:0.2rem;}';
     document.head.appendChild(st);
   }
   function ageCheckLabel() {
@@ -5761,6 +4681,7 @@
     if (!ov) return;
     ov.classList.add('open');
     var mode = tab || 'join';
+    if (mode === 'register' && !accountsOpen()) mode = 'join';
     if (mode === 'login') mode = 'join';
     var tabs = document.querySelector('#cv-auth-overlay .conv-modal-tabs');
     var login = document.getElementById('cv-panel-login');
@@ -6121,609 +5042,612 @@
   }
 
   function wireComposeToolbar() {
-    var imgBtn = document.getElementById('compose-btn-image');
-    var gifBtn = document.getElementById('compose-btn-gif');
-    var imgIn = document.getElementById('compose-image-input');
-    var gifIn = document.getElementById('compose-gif-input');
-    if (imgBtn && imgIn) imgBtn.addEventListener('click', function () { imgIn.click(); });
-    if (gifBtn && gifIn) gifBtn.addEventListener('click', function () { gifIn.click(); });
-    if (imgIn) imgIn.addEventListener('change', function (e) { if (e.target.files[0]) setImagePreview(e.target.files[0]); });
-    if (gifIn) gifIn.addEventListener('change', function (e) { if (e.target.files[0]) setImagePreview(e.target.files[0]); });
-    var remove = document.getElementById('compose-image-remove');
-    if (remove) remove.addEventListener('click', function () {
-      attachedFile = null;
-      document.getElementById('compose-image-preview').hidden = true;
-      document.getElementById('compose-preview-img').src = '';
-      document.getElementById('compose-preview-img').alt = '';
-      if (previewObjectUrl) {
-        try { URL.revokeObjectURL(previewObjectUrl); } catch (e2) {}
-        previewObjectUrl = null;
-      }
-      if (imgIn) imgIn.value = '';
-      if (gifIn) gifIn.value = '';
-      syncPostBtn();
-    });
-    var wrap = document.getElementById('thoughts-compose-wrap');
-    if (wrap) {
-      wrap.addEventListener('dragover', function (e) { e.preventDefault(); wrap.classList.add('drag-over'); });
-      wrap.addEventListener('dragleave', function () { wrap.classList.remove('drag-over'); });
-      wrap.addEventListener('drop', function (e) {
-        e.preventDefault(); wrap.classList.remove('drag-over');
-        var files = e.dataTransfer && e.dataTransfer.files;
-        if (!files) return;
-        for (var i = 0; i < files.length; i++) {
-          if (files[i].type && files[i].type.indexOf('image/') === 0) { setImagePreview(files[i]); break; }
-        }
-      });
-    }
+   var imgBtn = document.getElementById('compose-btn-image');
+   var gifBtn = document.getElementById('compose-btn-gif');
+   var imgIn = document.getElementById('compose-image-input');
+   var gifIn = document.getElementById('compose-gif-input');
+   if (imgBtn && imgIn) imgBtn.addEventListener('click', function () { imgIn.click(); });
+   if (gifBtn && gifIn) gifBtn.addEventListener('click', function () { gifIn.click(); });
+   if (imgIn) imgIn.addEventListener('change', function (e) { if (e.target.files[0]) setImagePreview(e.target.files[0]); });
+   if (gifIn) gifIn.addEventListener('change', function (e) { if (e.target.files[0]) setImagePreview(e.target.files[0]); });
+   var remove = document.getElementById('compose-image-remove');
+   if (remove) remove.addEventListener('click', function () {
+     attachedFile = null;
+     document.getElementById('compose-image-preview').hidden = true;
+     document.getElementById('compose-preview-img').src = '';
+     document.getElementById('compose-preview-img').alt = '';
+     if (previewObjectUrl) {
+       try { URL.revokeObjectURL(previewObjectUrl); } catch (e2) {}
+       previewObjectUrl = null;
+     }
+     if (imgIn) imgIn.value = '';
+     if (gifIn) gifIn.value = '';
+     syncPostBtn();
+   });
+   var wrap = document.getElementById('thoughts-compose-wrap');
+   if (wrap) {
+     wrap.addEventListener('dragover', function (e) { e.preventDefault(); wrap.classList.add('drag-over'); });
+     wrap.addEventListener('dragleave', function () { wrap.classList.remove('drag-over'); });
+     wrap.addEventListener('drop', function (e) {
+       e.preventDefault(); wrap.classList.remove('drag-over');
+       var files = e.dataTransfer && e.dataTransfer.files;
+       if (!files) return;
+       for (var i = 0; i < files.length; i++) {
+         if (files[i].type && files[i].type.indexOf('image/') === 0) { setImagePreview(files[i]); break; }
+       }
+     });
+   }
 
-    function takeClipboardImage(e) {
-      var cd = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
-      if (!cd) return false;
-      var items = cd.items;
-      if (items && items.length) {
-        for (var i = 0; i < items.length; i++) {
-          var it = items[i];
-          if (it && it.kind === 'file' && it.type && it.type.indexOf('image/') === 0) {
-            var f = it.getAsFile();
-            if (f) { setImagePreview(f); return true; }
-          }
-        }
-      }
-      var files = cd.files;
-      if (files && files.length) {
-        for (var j = 0; j < files.length; j++) {
-          if (files[j] && files[j].type && files[j].type.indexOf('image/') === 0) {
-            setImagePreview(files[j]);
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-    function onComposePaste(e) {
-      if (takeClipboardImage(e)) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    }
-    if (wrap) wrap.addEventListener('paste', onComposePaste, true);
+   function takeClipboardImage(e) {
+     var cd = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
+     if (!cd) return false;
+     var items = cd.items;
+     if (items && items.length) {
+       for (var i = 0; i < items.length; i++) {
+         var it = items[i];
+         if (it && it.kind === 'file' && it.type && it.type.indexOf('image/') === 0) {
+           var f = it.getAsFile();
+           if (f) { setImagePreview(f); return true; }
+         }
+       }
+     }
+     var files = cd.files;
+     if (files && files.length) {
+       for (var j = 0; j < files.length; j++) {
+         if (files[j] && files[j].type && files[j].type.indexOf('image/') === 0) {
+           setImagePreview(files[j]);
+           return true;
+         }
+       }
+     }
+     return false;
+   }
+   function onComposePaste(e) {
+     if (takeClipboardImage(e)) {
+       e.preventDefault();
+       e.stopPropagation();
+     }
+   }
+   if (wrap) wrap.addEventListener('paste', onComposePaste, true);
 
-    var pollPanel = document.getElementById('compose-poll');
-    var pollBtn = document.getElementById('compose-btn-poll');
-    if (pollBtn && pollPanel) {
-      pollBtn.addEventListener('click', function () {
-        pollActive = !pollActive;
-        pollPanel.hidden = !pollActive;
-        pollBtn.style.color = pollActive ? 'var(--accent)' : '';
-        syncPostBtn();
-      });
-    }
-    var pollAdd = document.getElementById('compose-poll-add');
-    if (pollAdd && pollPanel) {
-      pollAdd.addEventListener('click', function () {
-        var options = pollPanel.querySelectorAll('.compose-poll-option');
-        if (options.length >= 4) return;
-        var idx = options.length;
-        var div = document.createElement('div');
-        div.className = 'compose-poll-option';
-        div.innerHTML = '<input class="compose-poll-input" placeholder="Choice ' + (idx + 1) + '" maxlength="60" data-poll-opt="' + idx + '"><button type="button" class="compose-poll-remove" title="Remove">×</button>';
-        var rm = div.querySelector('.compose-poll-remove');
-        if (rm) rm.addEventListener('click', function () { div.remove(); syncPostBtn(); });
-        pollPanel.querySelector('.compose-poll-footer').before(div);
-        syncPostBtn();
-      });
-    }
-    if (pollPanel) pollPanel.addEventListener('input', syncPostBtn);
-    var emojiBtn = document.getElementById('compose-btn-emoji');
-    if (emojiBtn) emojiBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      var wrap2 = document.getElementById('compose-emoji-wrap');
-      if (wrap2) { wrap2.remove(); return; }
-      wrap2 = document.createElement('div');
-      wrap2.id = 'compose-emoji-wrap';
-      wrap2.className = 'compose-emoji-wrap';
-      var picker = document.createElement('emoji-picker');
-      wrap2.appendChild(picker);
-      document.body.appendChild(wrap2);
-      var btnRect = e.currentTarget.getBoundingClientRect();
-      wrap2.style.top = (btnRect.top - 315) + 'px';
-      wrap2.style.left = Math.max(4, btnRect.left - 120) + 'px';
-      var composeInput = document.getElementById('thoughts-compose-input');
-      picker.addEventListener('emoji-click', function (ev) {
-        var em = ev.detail.unicode;
-        var pos = composeInput.selectionStart || composeInput.value.length;
-        composeInput.value = composeInput.value.slice(0, pos) + em + composeInput.value.slice(pos);
-        composeInput.dispatchEvent(new Event('input'));
-        composeInput.focus();
-        wrap2.remove();
-      });
-      var close = function (ev) {
-        if (!wrap2.contains(ev.target) && ev.target !== e.currentTarget) {
-          wrap2.remove();
-          document.removeEventListener('click', close);
-        }
-      };
-      setTimeout(function () { document.addEventListener('click', close); }, 20);
-    });
+   var pollPanel = document.getElementById('compose-poll');
+   var pollBtn = document.getElementById('compose-btn-poll');
+   if (pollBtn && pollPanel) {
+     pollBtn.addEventListener('click', function () {
+       pollActive = !pollActive;
+       pollPanel.hidden = !pollActive;
+       pollBtn.style.color = pollActive ? 'var(--accent)' : '';
+       syncPostBtn();
+     });
+   }
+   var pollAdd = document.getElementById('compose-poll-add');
+   if (pollAdd && pollPanel) {
+     pollAdd.addEventListener('click', function () {
+       var options = pollPanel.querySelectorAll('.compose-poll-option');
+       if (options.length >= 4) return;
+       var idx = options.length;
+       var div = document.createElement('div');
+       div.className = 'compose-poll-option';
+       div.innerHTML = '<input class="compose-poll-input" placeholder="Choice ' + (idx + 1) + '" maxlength="60" data-poll-opt="' + idx + '"><button type="button" class="compose-poll-remove" title="Remove">×</button>';
+       var rm = div.querySelector('.compose-poll-remove');
+       if (rm) rm.addEventListener('click', function () { div.remove(); syncPostBtn(); });
+       pollPanel.querySelector('.compose-poll-footer').before(div);
+       syncPostBtn();
+     });
+   }
+   if (pollPanel) pollPanel.addEventListener('input', syncPostBtn);
+   var emojiBtn = document.getElementById('compose-btn-emoji');
+   if (emojiBtn) emojiBtn.addEventListener('click', function (e) {
+     e.stopPropagation();
+     var wrap2 = document.getElementById('compose-emoji-wrap');
+     if (wrap2) { wrap2.remove(); return; }
+     wrap2 = document.createElement('div');
+     wrap2.id = 'compose-emoji-wrap';
+     wrap2.className = 'compose-emoji-wrap';
+     var picker = document.createElement('emoji-picker');
+     wrap2.appendChild(picker);
+     document.body.appendChild(wrap2);
+     var btnRect = e.currentTarget.getBoundingClientRect();
+     wrap2.style.top = (btnRect.top - 315) + 'px';
+     wrap2.style.left = Math.max(4, btnRect.left - 120) + 'px';
+     var composeInput = document.getElementById('thoughts-compose-input');
+     picker.addEventListener('emoji-click', function (ev) {
+       var em = ev.detail.unicode;
+       var pos = composeInput.selectionStart || composeInput.value.length;
+       composeInput.value = composeInput.value.slice(0, pos) + em + composeInput.value.slice(pos);
+       composeInput.dispatchEvent(new Event('input'));
+       composeInput.focus();
+       wrap2.remove();
+     });
+     var close = function (ev) {
+       if (!wrap2.contains(ev.target) && ev.target !== e.currentTarget) {
+         wrap2.remove();
+         document.removeEventListener('click', close);
+       }
+     };
+     setTimeout(function () { document.addEventListener('click', close); }, 20);
+   });
   }
 
   function wireEvents() {
-    document.addEventListener('click', function (e) {
-      if (e.target.closest('#nav-nest-add')) {
-        e.preventDefault();
-        if (!isLiveUser()) { openAuth('join'); return; }
-        var form = document.getElementById('nav-nest-form');
-        if (!form) return;
-        if (!form.hidden) { hideNestAddForm(); return; }
-        form.hidden = false;
-        nestAddSlugDirty = false;
-        var nestLabel = document.getElementById('nest-add-label');
-        var nestSlugInput = document.getElementById('nest-add-slug');
-        var nestErr = document.getElementById('nest-add-err');
-        if (nestLabel) nestLabel.value = '';
-        if (nestSlugInput) nestSlugInput.value = '';
-        if (nestErr) nestErr.textContent = '';
-        if (nestLabel) nestLabel.focus();
-        return;
-      }
-      if (e.target.closest('#nest-add-save')) {
-        e.preventDefault();
-        submitNestAdd();
-        return;
-      }
-      if (e.target.closest('#nest-feed-more')) {
-        e.preventDefault();
-        loadMoreNestPosts();
-        return;
-      }
-      const nestLink = e.target.closest('a[data-nest]');
-      if (nestLink) {
-        e.preventDefault();
-        goNest(nestLink.getAttribute('data-nest'));
-        return;
-      }
-      const social = e.target.closest('[data-social]');
-      if (social) {
-        e.preventDefault();
-        go(social.dataset.social);
-        return;
-      }
-      if (e.target.closest('#watchlist-add')) {
-        e.preventDefault();
-        if (!isLiveUser()) { openAuth('join'); return; }
-        watchlistPickerOpen = !watchlistPickerOpen;
-        renderWatchlist();
-        if (watchlistPickerOpen) {
-          var watchSearch = document.getElementById('watchlist-search');
-          if (watchSearch) watchSearch.focus();
-        }
-        return;
-      }
-      if (e.target.closest('[data-watch-signin]')) {
-        e.preventDefault();
-        openAuth('join');
-        return;
-      }
-      var watchRemove = e.target.closest('[data-watch-remove]');
-      if (watchRemove) {
-        e.preventDefault();
-        if (!isLiveUser()) { openAuth('join'); return; }
-        removeFromWatchlist(watchRemove.getAttribute('data-watch-remove'));
-        return;
-      }
-      var watchAdd = e.target.closest('[data-watch-add]');
-      if (watchAdd) {
-        e.preventDefault();
-        if (!isLiveUser()) { openAuth('join'); return; }
-        addToWatchlist(watchAdd.getAttribute('data-watch-add'));
-        return;
-      }
-      var watchOpen = e.target.closest('[data-watch-topic]');
-      if (watchOpen) {
-        e.preventDefault();
-        go('topic/' + watchOpen.getAttribute('data-watch-topic'));
-        return;
-      }
-      if (e.target.closest('[data-topic-clear]')) {
-        e.preventDefault();
-        goRoom();
-        return;
-      }
-      if (e.target.closest('#auth-signin') || e.target.closest('#profile-signin-prompt-btn')) {
-        openAuth('join');
-        return;
-      }
-      if (e.target.closest('#cv-use-email-btn')) {
-        toggleEmailAuth();
-        return;
-      }
-      if (e.target.closest('#cv-goto-register')) {
-        openAuth('register');
-        return;
-      }
-      if (e.target.closest('#cv-goto-join')) {
-        openAuth('join');
-        return;
-      }
-      if (e.target.closest('#auth-signout')) { signOut(); return; }
+   document.addEventListener('click', function (e) {
+     if (e.target.closest('#nav-nest-add')) {
+       e.preventDefault();
+       if (!isLiveUser()) { openAuth('join'); return; }
+       var form = document.getElementById('nav-nest-form');
+       if (!form) return;
+       if (!form.hidden) { hideNestAddForm(); return; }
+       form.hidden = false;
+       nestAddSlugDirty = false;
+       var nestLabel = document.getElementById('nest-add-label');
+       var nestSlugInput = document.getElementById('nest-add-slug');
+       var nestErr = document.getElementById('nest-add-err');
+       if (nestLabel) nestLabel.value = '';
+       if (nestSlugInput) nestSlugInput.value = '';
+       if (nestErr) nestErr.textContent = '';
+       if (nestLabel) nestLabel.focus();
+       return;
+     }
+     if (e.target.closest('#nest-add-save')) {
+       e.preventDefault();
+       submitNestAdd();
+       return;
+     }
+     if (e.target.closest('#nest-feed-more')) {
+       e.preventDefault();
+       loadMoreNestPosts();
+       return;
+     }
+     const nestLink = e.target.closest('a[data-nest]');
+     if (nestLink) {
+       e.preventDefault();
+       goNest(nestLink.getAttribute('data-nest'));
+       return;
+     }
+     const social = e.target.closest('[data-social]');
+     if (social) {
+       e.preventDefault();
+       go(social.dataset.social);
+       return;
+     }
+     if (e.target.closest('#watchlist-add')) {
+       e.preventDefault();
+       if (!isLiveUser()) { openAuth('join'); return; }
+       watchlistPickerOpen = !watchlistPickerOpen;
+       renderWatchlist();
+       if (watchlistPickerOpen) {
+         var watchSearch = document.getElementById('watchlist-search');
+         if (watchSearch) watchSearch.focus();
+       }
+       return;
+     }
+     if (e.target.closest('[data-watch-signin]')) {
+       e.preventDefault();
+       openAuth('join');
+       return;
+     }
+     var watchRemove = e.target.closest('[data-watch-remove]');
+     if (watchRemove) {
+       e.preventDefault();
+       if (!isLiveUser()) { openAuth('join'); return; }
+       removeFromWatchlist(watchRemove.getAttribute('data-watch-remove'));
+       return;
+     }
+     var watchAdd = e.target.closest('[data-watch-add]');
+     if (watchAdd) {
+       e.preventDefault();
+       if (!isLiveUser()) { openAuth('join'); return; }
+       addToWatchlist(watchAdd.getAttribute('data-watch-add'));
+       return;
+     }
+     var watchOpen = e.target.closest('[data-watch-topic]');
+     if (watchOpen) {
+       e.preventDefault();
+       go('topic/' + watchOpen.getAttribute('data-watch-topic'));
+       return;
+     }
+     if (e.target.closest('[data-topic-clear]')) {
+       e.preventDefault();
+       goRoom();
+       return;
+     }
+     if (e.target.closest('#auth-signin') || e.target.closest('#profile-signin-prompt-btn')) {
+       openAuth('join');
+       return;
+     }
+     if (e.target.closest('#cv-use-email-btn')) {
+       toggleEmailAuth();
+       return;
+     }
+     if (e.target.closest('#cv-goto-register')) {
+       openAuth('register');
+       return;
+     }
+     if (e.target.closest('#cv-goto-join')) {
+       openAuth('join');
+       return;
+     }
+     if (e.target.closest('#auth-signout')) { signOut(); return; }
 
-      if (e.target.closest('#profile-follow-btn')) {
-        togglePersonFollow();
-        return;
-      }
-      if (e.target.closest('#profile-message-btn')) {
-        if (!dmsOn()) return;
-        if (!isLiveUser()) { openAuth('join'); return; }
-        if (viewingProfile && viewingProfile.uid) startDm(viewingProfile.uid, viewingProfile.name);
-        return;
-      }
-      const profileWho = e.target.closest('[data-profile-uid]');
-      if (profileWho && (dmsOn() || followingOn()) && !e.target.closest('[data-act]')) {
-        e.preventDefault();
-        openUserProfile(
-          profileWho.getAttribute('data-profile-uid'),
-          profileWho.getAttribute('data-profile-name'),
-          profileWho.getAttribute('data-profile-handle')
-        );
-        return;
-      }
-      const threadItem = e.target.closest('[data-cid]');
-      if (threadItem && dmsOn()) {
-        var opened = findConv(threadItem.getAttribute('data-cid'));
-        pendingPeer = opened ? { uid: convPeerUid(opened), name: convPeerName(opened) } : pendingPeer;
-        openThread(threadItem.getAttribute('data-cid'));
-        return;
-      }
-      const pickItem = e.target.closest('[data-pick-uid]');
-      if (pickItem) {
-        hideDmPicker();
-        startDm(pickItem.getAttribute('data-pick-uid'), pickItem.getAttribute('data-pick-name'));
-        return;
-      }
-      if (e.target.closest('#chat-picker-close')) {
-        hideDmPicker();
-        return;
-      }
+     if (e.target.closest('#profile-follow-btn')) {
+       togglePersonFollow();
+       return;
+     }
+     if (e.target.closest('#profile-message-btn')) {
+       if (!dmsOn()) return;
+       if (!isLiveUser()) { openAuth('join'); return; }
+       if (viewingProfile && viewingProfile.uid) startDm(viewingProfile.uid, viewingProfile.name);
+       return;
+     }
+     const profileWho = e.target.closest('[data-profile-uid]');
+     if (profileWho && (dmsOn() || followingOn()) && !e.target.closest('[data-act]')) {
+       e.preventDefault();
+       openUserProfile(
+         profileWho.getAttribute('data-profile-uid'),
+         profileWho.getAttribute('data-profile-name'),
+         profileWho.getAttribute('data-profile-handle')
+       );
+       return;
+     }
+     const threadItem = e.target.closest('[data-cid]');
+     if (threadItem && dmsOn()) {
+       var opened = findConv(threadItem.getAttribute('data-cid'));
+       pendingPeer = opened ? { uid: convPeerUid(opened), name: convPeerName(opened) } : pendingPeer;
+       openThread(threadItem.getAttribute('data-cid'));
+       return;
+     }
+     const pickItem = e.target.closest('[data-pick-uid]');
+     if (pickItem) {
+       hideDmPicker();
+       startDm(pickItem.getAttribute('data-pick-uid'), pickItem.getAttribute('data-pick-name'));
+       return;
+     }
+     if (e.target.closest('#chat-picker-close')) {
+       hideDmPicker();
+       return;
+     }
 
-      const followBtn = e.target.closest('[data-topic-follow]');
-      if (followBtn) {
-        e.preventDefault();
-        e.stopPropagation();
-        toggleTopicFollow(followBtn);
-        return;
-      }
+     const followBtn = e.target.closest('[data-topic-follow]');
+     if (followBtn) {
+       e.preventDefault();
+       e.stopPropagation();
+       toggleTopicFollow(followBtn);
+       return;
+     }
 
-      const porchBtn = e.target.closest('[data-porch]');
-      if (porchBtn) {
-        e.preventDefault();
-        porchPick(porchBtn.getAttribute('data-porch'));
-        return;
-      }
+     const porchBtn = e.target.closest('[data-porch]');
+     if (porchBtn) {
+       e.preventDefault();
+       porchPick(porchBtn.getAttribute('data-porch'));
+       return;
+     }
 
-      const pollOpt = e.target.closest('[data-poll-idx]');
-      if (pollOpt) {
-        votePoll(pollOpt.dataset.postId, parseInt(pollOpt.dataset.pollIdx, 10));
-        return;
-      }
+     const pollOpt = e.target.closest('[data-poll-idx]');
+     if (pollOpt) {
+       votePoll(pollOpt.dataset.postId, parseInt(pollOpt.dataset.pollIdx, 10));
+       return;
+     }
 
-      const tab = e.target.closest('[data-thoughts-tab]');
-      if (tab) {
-        const t = tab.dataset.thoughtsTab;
-        if (t === 'following') go('following');
-        else if (t === 'hot') go('hot');
-        else if (t === 'new') go('new');
-        else goRoom();
-        return;
-      }
+     const tab = e.target.closest('[data-thoughts-tab]');
+     if (tab) {
+       const t = tab.dataset.thoughtsTab;
+       if (t === 'following') go('following');
+       else if (t === 'hot') go('hot');
+       else if (t === 'new') go('new');
+       else goRoom();
+       return;
+     }
 
-      const likeBtn = e.target.closest('[data-act="like"]');
-      if (likeBtn) {
-        const post = likeBtn.closest('[data-post-id]');
-        if (!post) return;
-        toggleLike(post.dataset.postId);
-        return;
-      }
-      if (e.target.closest('[data-act="delete"]')) {
-        const post = e.target.closest('[data-post-id]');
-        if (!post) return;
-        deleteOwnPost(post.dataset.postId);
-        return;
-      }
-      if (e.target.closest('[data-act="reply"]')) {
-        if (!isLiveUser()) { composeErr('Sign in to reply. Guest can only browse.'); openAuth('join'); return; }
-        const post = e.target.closest('[data-post-id]');
-        if (!post) return;
-        var seedPost = findPost(post.dataset.postId);
-        if (isSessionSeedPost(seedPost)) {
-          replyTo = null;
-          const seedInput = document.getElementById('thoughts-compose-input');
-          if (seedInput) {
-            if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
-            seedInput.placeholder = 'Answer the room…';
-            seedInput.focus();
-          }
-          return;
-        }
-        replyTo = post.dataset.parentId || post.dataset.postId;
-        const input = document.getElementById('thoughts-compose-input');
-        if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
-        input.placeholder = 'Reply to this post…';
-        input.focus();
-        return;
-      }
-      if (e.target.closest('[data-act="share"]')) {
-        const post = e.target.closest('[data-post-id]');
-        if (!post) return;
-        sharePost(post.dataset.postId);
-        return;
-      }
-      if (e.target.closest('[data-act="report"]')) {
-        const post = e.target.closest('[data-post-id]');
-        if (!post) return;
-        reportPost(post.dataset.postId);
-        return;
-      }
-      if (e.target.closest('[data-act="block"]')) {
-        const post = e.target.closest('[data-post-id]');
-        if (!post) return;
-        const p = findPost(post.dataset.postId);
-        if (p && p.authorUid) blockUser(p.authorUid);
-        return;
-      }
+     const likeBtn = e.target.closest('[data-act="like"]');
+     if (likeBtn) {
+       const post = likeBtn.closest('[data-post-id]');
+       if (!post) return;
+       toggleLike(post.dataset.postId);
+       return;
+     }
+     if (e.target.closest('[data-act="delete"]')) {
+       const post = e.target.closest('[data-post-id]');
+       if (!post) return;
+       deleteOwnPost(post.dataset.postId);
+       return;
+     }
+     if (e.target.closest('[data-act="reply"]')) {
+       if (!isLiveUser()) { composeErr('Sign in to reply. Guest can only browse.'); openAuth('join'); return; }
+       const post = e.target.closest('[data-post-id]');
+       if (!post) return;
+       var seedPost = findPost(post.dataset.postId);
+       if (isSessionSeedPost(seedPost)) {
+         replyTo = null;
+         const seedInput = document.getElementById('thoughts-compose-input');
+         if (seedInput) {
+           if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
+           seedInput.placeholder = 'Answer the room…';
+           seedInput.focus();
+         }
+         return;
+       }
+       replyTo = post.dataset.parentId || post.dataset.postId;
+       const input = document.getElementById('thoughts-compose-input');
+       if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
+       input.placeholder = 'Reply to this post…';
+       input.focus();
+       return;
+     }
+     if (e.target.closest('[data-act="share"]')) {
+       const post = e.target.closest('[data-post-id]');
+       if (!post) return;
+       sharePost(post.dataset.postId);
+       return;
+     }
+     if (e.target.closest('[data-act="report"]')) {
+       const post = e.target.closest('[data-post-id]');
+       if (!post) return;
+       reportPost(post.dataset.postId);
+       return;
+     }
+     if (e.target.closest('[data-act="block"]')) {
+       const post = e.target.closest('[data-post-id]');
+       if (!post) return;
+       const p = findPost(post.dataset.postId);
+       if (p && p.authorUid) blockUser(p.authorUid);
+       return;
+     }
 
-      const ntab = e.target.closest('[data-notif-tab]');
-      if (ntab) {
-        notifTab = ntab.getAttribute('data-notif-tab') || 'all';
-        document.querySelectorAll('[data-notif-tab]').forEach(function (t) {
-          t.classList.toggle('active', t === ntab);
-        });
-        renderNotifs();
-        return;
-      }
-      const nitem = e.target.closest('[data-notif-id]');
-      if (nitem) {
-        var nid = nitem.getAttribute('data-notif-id');
-        if (nitem.getAttribute('data-notif-type') === 'report') {
-          if (nid) markNotifsRead(nid);
-          openReports();
-          return;
-        }
-        if (nid) markNotifsRead(nid);
-        var pid = nitem.getAttribute('data-post-id');
-        if (pid) {
-          deepPostId = pid;
-          deepPostDone = false;
-          go('home');
-        }
-        return;
-      }
+     const ntab = e.target.closest('[data-notif-tab]');
+     if (ntab) {
+       notifTab = ntab.getAttribute('data-notif-tab') || 'all';
+       document.querySelectorAll('[data-notif-tab]').forEach(function (t) {
+         t.classList.toggle('active', t === ntab);
+       });
+       renderNotifs();
+       return;
+     }
+     const nitem = e.target.closest('[data-notif-id]');
+     if (nitem) {
+       var nid = nitem.getAttribute('data-notif-id');
+       if (nitem.getAttribute('data-notif-type') === 'report') {
+         if (nid) markNotifsRead(nid);
+         openReports();
+         return;
+       }
+       if (nid) markNotifsRead(nid);
+       var pid = nitem.getAttribute('data-post-id');
+       if (pid) {
+         deepPostId = pid;
+         deepPostDone = false;
+         go('home');
+       }
+       return;
+     }
 
-      const etab = e.target.closest('[data-explore-tab]');
-      if (etab) {
-        document.querySelectorAll('[data-explore-tab]').forEach(function (t) {
-          t.classList.toggle('active', t === etab);
-        });
-        var which = etab.dataset.exploreTab;
-        document.querySelectorAll('.explore-pane').forEach(function (p) {
-          p.classList.toggle('active', p.id === 'explore-pane-' + which);
-        });
-        return;
-      }
+     const etab = e.target.closest('[data-explore-tab]');
+     if (etab) {
+       document.querySelectorAll('[data-explore-tab]').forEach(function (t) {
+         t.classList.toggle('active', t === etab);
+       });
+       var which = etab.dataset.exploreTab;
+       document.querySelectorAll('.explore-pane').forEach(function (p) {
+         p.classList.toggle('active', p.id === 'explore-pane-' + which);
+       });
+       return;
+     }
 
-      if (isMobileNav() && document.body.classList.contains('nav-open')
-          && sidebar && !sidebar.contains(e.target) && hamburger && !hamburger.contains(e.target)) {
-        closeMobileNav();
-      }
-    });
+     if (isMobileNav() && document.body.classList.contains('nav-open')
+         && sidebar && !sidebar.contains(e.target) && hamburger && !hamburger.contains(e.target)) {
+       closeMobileNav();
+     }
+   });
 
-    document.addEventListener('keydown', function (e) {
-      if (e.key !== 'Escape') return;
-      var nestForm = document.getElementById('nav-nest-form');
-      if (nestForm && !nestForm.hidden) { e.preventDefault(); hideNestAddForm(); return; }
-      if (closeStoriesViewer()) { e.preventDefault(); return; }
-      if (closeStoriesComposer()) { e.preventDefault(); return; }
-      const picker = document.getElementById('chat-user-picker');
-      if (picker && !picker.hidden) { e.preventDefault(); hideDmPicker(); return; }
-      const shareOv = document.getElementById('share-sheet');
-      if (shareOv && !shareOv.hidden) { e.preventDefault(); closeShareSheet(); return; }
-      const ov = document.getElementById('cv-auth-overlay');
-      if (ov && ov.classList.contains('open')) { e.preventDefault(); closeAuth(); return; }
-      if (isMobileNav() && document.body.classList.contains('nav-open')) closeMobileNav();
-    });
+   document.addEventListener('keydown', function (e) {
+     if (e.key !== 'Escape') return;
+     var nestForm = document.getElementById('nav-nest-form');
+     if (nestForm && !nestForm.hidden) { e.preventDefault(); hideNestAddForm(); return; }
+     if (closeStoriesViewer()) { e.preventDefault(); return; }
+     if (closeStoriesComposer()) { e.preventDefault(); return; }
+     const picker = document.getElementById('chat-user-picker');
+     if (picker && !picker.hidden) { e.preventDefault(); hideDmPicker(); return; }
+     const shareOv = document.getElementById('share-sheet');
+     if (shareOv && !shareOv.hidden) { e.preventDefault(); closeShareSheet(); return; }
+     const ov = document.getElementById('cv-auth-overlay');
+     if (ov && ov.classList.contains('open')) { e.preventDefault(); closeAuth(); return; }
+     if (isMobileNav() && document.body.classList.contains('nav-open')) closeMobileNav();
+   });
 
-    hamburger.addEventListener('click', function () {
-      if (isMobileNav()) document.body.classList.toggle('nav-open');
-      else document.body.classList.toggle('nav-collapsed');
-      syncHamburgerAria();
-    });
-    window.addEventListener('resize', syncHamburgerAria);
-    document.getElementById('nav-overlay').addEventListener('click', closeMobileNav);
-    document.getElementById('right-panel-tab').addEventListener('click', function () {
-      document.body.classList.toggle('right-collapsed');
-    });
-    document.getElementById('sidebar-search-btn').addEventListener('click', function () { go('explore'); });
-    document.getElementById('sidebar-post-btn').addEventListener('click', function () {
-      goRoom();
-      setTimeout(function () {
-        const input = document.getElementById('thoughts-compose-input');
-        if (input) { input.focus(); input.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
-      }, 120);
-    });
+   hamburger.addEventListener('click', function () {
+     if (isMobileNav()) document.body.classList.toggle('nav-open');
+     else document.body.classList.toggle('nav-collapsed');
+     syncHamburgerAria();
+   });
+   window.addEventListener('resize', syncHamburgerAria);
+   document.getElementById('nav-overlay').addEventListener('click', closeMobileNav);
+   document.getElementById('right-panel-tab').addEventListener('click', function () {
+     document.body.classList.toggle('right-collapsed');
+   });
+   document.getElementById('sidebar-search-btn').addEventListener('click', function () { go('explore'); });
+   document.getElementById('sidebar-post-btn').addEventListener('click', function () {
+     goRoom();
+     setTimeout(function () {
+       const input = document.getElementById('thoughts-compose-input');
+       if (input) { input.focus(); input.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+     }, 120);
+   });
 
-    ['profile-back', 'notif-back', 'explore-back'].forEach(function (id) {
-      document.getElementById(id).addEventListener('click', function () { goRoom(); });
-    });
-    var markRead = document.getElementById('notif-mark-read');
-    if (markRead) markRead.addEventListener('click', function () { markNotifsRead(); });
+   ['profile-back', 'notif-back', 'explore-back'].forEach(function (id) {
+     document.getElementById(id).addEventListener('click', function () { goRoom(); });
+   });
+   var markRead = document.getElementById('notif-mark-read');
+   if (markRead) markRead.addEventListener('click', function () { markNotifsRead(); });
 
-    var chatNew = document.getElementById('chat-new-btn');
-    if (chatNew) chatNew.addEventListener('click', onChatNew);
-    var chatPlaceholderNew = document.getElementById('chat-placeholder-new');
-    if (chatPlaceholderNew) chatPlaceholderNew.addEventListener('click', onChatNew);
-    var chatSend = document.getElementById('chat-send-btn');
-    if (chatSend) chatSend.addEventListener('click', function () {
-      if (dmSendInFlight) return;
-      sendDm();
-    });
-    var chatInput = document.getElementById('chat-compose-input');
-    if (chatInput) {
-      chatInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          if (dmSendInFlight) return;
-          sendDm();
-        }
-      });
-    }
-    var chatSearch = document.getElementById('chat-search-input');
-    if (chatSearch) chatSearch.addEventListener('input', renderThreads);
+   var chatNew = document.getElementById('chat-new-btn');
+   if (chatNew) chatNew.addEventListener('click', onChatNew);
+   var chatPlaceholderNew = document.getElementById('chat-placeholder-new');
+   if (chatPlaceholderNew) chatPlaceholderNew.addEventListener('click', onChatNew);
+   var chatSend = document.getElementById('chat-send-btn');
+   if (chatSend) chatSend.addEventListener('click', function () {
+     if (dmSendInFlight) return;
+     sendDm();
+   });
+   var chatInput = document.getElementById('chat-compose-input');
+   if (chatInput) {
+     chatInput.addEventListener('keydown', function (e) {
+       if (e.key === 'Enter' && !e.shiftKey) {
+         e.preventDefault();
+         if (dmSendInFlight) return;
+         sendDm();
+       }
+     });
+   }
+   var chatSearch = document.getElementById('chat-search-input');
+   if (chatSearch) chatSearch.addEventListener('input', renderThreads);
 
-    document.getElementById('profile-edit-btn').addEventListener('click', function () {
-      openAuth('register');
-    });
+   document.getElementById('profile-edit-btn').addEventListener('click', function () {
+     openAuth('register');
+   });
 
-    const compose = document.getElementById('thoughts-compose-input');
-    const postBtn = document.getElementById('thoughts-post-btn');
-    compose.addEventListener('input', function () {
-      compose.style.height = 'auto';
-      compose.style.height = Math.min(compose.scrollHeight, 200) + 'px';
-      syncPostBtn();
-    });
-    postBtn.addEventListener('click', maybePost);
-    wireComposeToolbar();
+   const compose = document.getElementById('thoughts-compose-input');
+   const postBtn = document.getElementById('thoughts-post-btn');
+   compose.addEventListener('input', function () {
+     compose.style.height = 'auto';
+     compose.style.height = Math.min(compose.scrollHeight, 200) + 'px';
+     syncPostBtn();
+   });
+   postBtn.addEventListener('click', maybePost);
+   wireComposeToolbar();
 
-    document.getElementById('cv-modal-close').addEventListener('click', function (e) {
-      e.preventDefault();
-      closeAuth();
-    });
-    document.getElementById('cv-auth-overlay').addEventListener('click', function (e) {
-      if (e.target.id === 'cv-auth-overlay') closeAuth();
-    });
-    document.querySelectorAll('.conv-modal-tab').forEach(function (t) {
-      t.addEventListener('click', function () { openAuth(t.dataset.tab); });
-    });
-    document.getElementById('cv-login-btn').addEventListener('click', function () {
-      const err = document.getElementById('cv-login-err');
-      runWithAuth(err, function () {
-        const email = (document.getElementById('cv-login-email').value || '').trim();
-        const pw = document.getElementById('cv-login-pw').value || '';
-        err.textContent = '';
-        markAuthLand();
-        fbAuth.signInWithEmailAndPassword(email, pw).catch(function (e) {
-          err.textContent = (e && e.message) ? e.message : 'Sign-in failed.';
-          err.classList.add('show');
-        });
-      });
-    });
-    document.getElementById('cv-reg-btn').addEventListener('click', function () {
-      const err = document.getElementById('cv-reg-err');
-      runWithAuth(err, function () {
-        const name = (document.getElementById('cv-reg-name').value || '').trim();
-        const email = (document.getElementById('cv-reg-email').value || '').trim();
-        const pw = document.getElementById('cv-reg-pw').value || '';
-        const age = document.getElementById('cv-reg-age');
-        if (!age || !age.checked) {
-          err.textContent = ageGateMessage();
-          err.classList.add('show');
-          return;
-        }
-        if (name && !nameOk(name)) {
-          err.textContent = 'That display name is reserved.';
-          err.classList.add('show');
-          return;
-        }
-        if (!email || pw.length < 6) { err.textContent = 'Email and a password of at least 6 characters.'; err.classList.add('show'); return; }
-        err.textContent = '';
-        markAuthLand();
-        fbAuth.createUserWithEmailAndPassword(email, pw).then(function (cred) {
-          cred.user.sendEmailVerification().catch(function () {});
-          return ensurePublicProfile(cred.user, name, {
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          }).then(function () {
-            composeErr('Account created. Verify your email before posting.');
-          });
-        }).catch(function (e) {
-          err.textContent = (e && e.message) ? e.message : 'Could not create account.';
-          err.classList.add('show');
-        });
-      });
-    });
-    document.getElementById('cv-google-login').addEventListener('click', function () {
-      var err = document.getElementById('cv-login-err');
-      runWithAuth(err, function () {
-      var age = document.getElementById('cv-google-age');
-      if (!age || !age.checked) {
-        err.textContent = ageGateMessage();
-        err.classList.add('show');
-        return;
-      }
-      err.textContent = '';
-      err.classList.remove('show');
-      markAuthLand();
-      var provider = new firebase.auth.GoogleAuthProvider();
-      var ua = navigator.userAgent || '';
-      var isiOS = /iP(hone|od|ad)/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      var isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|Android/i.test(ua);
-      function finishGoogle(cred) {
-        var u = cred && cred.user;
-        if (fbDb && u) {
-          return ensurePublicProfile(u, '', {
-            provider: 'google',
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
-          });
-        }
-      }
-      function failGoogle(e) {
-        var msg;
-        if (e && e.code === 'auth/operation-not-allowed') {
-          msg = 'Google is not enabled on subx-skins yet.';
-        } else if (e && e.code === 'auth/popup-closed-by-user') {
-          msg = 'Google sign-in cancelled.';
-        } else {
-          msg = (e && e.message) ? e.message : 'Google sign-in failed.';
-        }
-        err.textContent = msg;
-        err.classList.add('show');
-      }
-      if (isiOS || isSafari) {
-        fbAuth.signInWithRedirect(provider).catch(failGoogle);
-      } else {
-        fbAuth.signInWithPopup(provider).then(finishGoogle).catch(function (e) {
-          if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request')) {
-            return fbAuth.signInWithRedirect(provider);
-          }
-          failGoogle(e);
-        });
-      }
-      });
-    });
-    document.getElementById('cv-guest-login').addEventListener('click', function () { stubSignIn('Guest', skin('guestHandle', 'guest')); });
+   document.getElementById('cv-modal-close').addEventListener('click', function (e) {
+     e.preventDefault();
+     closeAuth();
+   });
+   document.getElementById('cv-auth-overlay').addEventListener('click', function (e) {
+     if (e.target.id === 'cv-auth-overlay') closeAuth();
+   });
+   document.querySelectorAll('.conv-modal-tab').forEach(function (t) {
+     t.addEventListener('click', function () { openAuth(t.dataset.tab); });
+   });
+   document.getElementById('cv-login-btn').addEventListener('click', function () {
+     const err = document.getElementById('cv-login-err');
+     runWithAuth(err, function () {
+       const email = (document.getElementById('cv-login-email').value || '').trim();
+       const pw = document.getElementById('cv-login-pw').value || '';
+       err.textContent = '';
+       markAuthLand();
+       fbAuth.signInWithEmailAndPassword(email, pw).catch(function (e) {
+         err.textContent = (e && e.message) ? e.message : 'Sign-in failed.';
+         err.classList.add('show');
+       });
+     });
+   });
+   document.getElementById('cv-reg-btn').addEventListener('click', function () {
+     const err = document.getElementById('cv-reg-err');
+     runWithAuth(err, function () {
+       const name = (document.getElementById('cv-reg-name').value || '').trim();
+       const email = (document.getElementById('cv-reg-email').value || '').trim();
+       const pw = document.getElementById('cv-reg-pw').value || '';
+       const age = document.getElementById('cv-reg-age');
+       if (!accountsOpen()) { err.textContent = ACC_CLOSED; err.classList.add('show'); return; }
+       if (!age || !age.checked) {
+         err.textContent = ageGateMessage();
+         err.classList.add('show');
+         return;
+       }
+       if (name && !nameOk(name)) {
+         err.textContent = 'That display name is reserved.';
+         err.classList.add('show');
+         return;
+       }
+       if (!email || pw.length < 6) { err.textContent = 'Email and a password of at least 6 characters.'; err.classList.add('show'); return; }
+       err.textContent = '';
+       markAuthLand();
+       fbAuth.createUserWithEmailAndPassword(email, pw).then(function (cred) {
+         cred.user.sendEmailVerification().catch(function () {});
+         return ensurePublicProfile(cred.user, name, {
+           createdAt: firebase.firestore.FieldValue.serverTimestamp()
+         }).then(function () {
+           composeErr('Account created. Verify your email before posting.');
+         });
+       }).catch(function (e) {
+         err.textContent = (e && e.message) ? e.message : 'Could not create account.';
+         err.classList.add('show');
+       });
+     });
+   });
+   document.getElementById('cv-google-login').addEventListener('click', function () {
+     var err = document.getElementById('cv-login-err');
+     runWithAuth(err, function () {
+     if (!accountsOpen() && !document.documentElement.classList.contains('acc-stew')) { err.textContent = ACC_CLOSED; err.classList.add('show'); return; }
+     var age = document.getElementById('cv-google-age');
+     if (!age || !age.checked) {
+       err.textContent = ageGateMessage();
+       err.classList.add('show');
+       return;
+     }
+     err.textContent = '';
+     err.classList.remove('show');
+     markAuthLand();
+     var provider = new firebase.auth.GoogleAuthProvider();
+     var ua = navigator.userAgent || '';
+     var isiOS = /iP(hone|od|ad)/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+     var isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|Android/i.test(ua);
+     function finishGoogle(cred) {
+       var u = cred && cred.user;
+       if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut().then(function () { throw new Error(ACC_CLOSED); });
+       if (fbDb && u) {
+         return ensurePublicProfile(u, '', {
+           provider: 'google',
+           createdAt: firebase.firestore.FieldValue.serverTimestamp()
+         });
+       }
+     }
+     function failGoogle(e) {
+       var msg;
+       if (e && e.code === 'auth/operation-not-allowed') {
+         msg = 'Google is not enabled on subx-skins yet.';
+       } else if (e && e.code === 'auth/popup-closed-by-user') {
+         msg = 'Google sign-in cancelled.';
+       } else {
+         msg = (e && e.message) ? e.message : 'Google sign-in failed.';
+       }
+       err.textContent = msg;
+       err.classList.add('show');
+     }
+     if (isiOS || isSafari) {
+       fbAuth.signInWithRedirect(provider).catch(failGoogle);
+     } else {
+       fbAuth.signInWithPopup(provider).then(finishGoogle).catch(function (e) {
+         if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request')) {
+           return fbAuth.signInWithRedirect(provider);
+         }
+         failGoogle(e);
+       });
+     }
+     });
+   });
+   document.getElementById('cv-guest-login').addEventListener('click', function () { stubSignIn('Guest', skin('guestHandle', 'guest')); });
 
-    const search = document.getElementById('explore-search-input');
-    search.addEventListener('input', function () {
-      const q = search.value.trim().toLowerCase();
-      function filt(list) {
-        if (!q) return list;
-        return list.filter(function (c) {
-          return (c.title + ' ' + c.snippet + ' ' + c.tag).toLowerCase().indexOf(q) !== -1;
-        });
-      }
-      function cards(list) {
-        if (!list.length) return '<p class="empty-note">' + escapeHtml(skin('exploreEmpty', 'Nothing in this room matched that.')) + '</p>';
-        return list.map(function (c) {
-          return '<article class="explore-card"><div class="explore-card-tag">' + escapeHtml(c.tag) +
-            '</div><div class="explore-card-title">' + escapeHtml(c.title) +
-            '</div><div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div></article>';
-        }).join('');
-      }
-      var seats = nestSeatCards();
-      document.getElementById('explore-pane-places').innerHTML = cards(filt(seats.length ? seats : PLACES));
-      document.getElementById('explore-pane-topics').innerHTML = cards(filt(TOPICS));
-      ensureExploreNestTab();
-      var nestPane = document.getElementById('explore-pane-nests');
-      if (nestPane) fillExploreNests(nestPane, filt(nestExploreCards()));
-    });
+   const search = document.getElementById('explore-search-input');
+   search.addEventListener('input', function () {
+     const q = search.value.trim().toLowerCase();
+     function filt(list) {
+       if (!q) return list;
+       return list.filter(function (c) {
+         return (c.title + ' ' + c.snippet + ' ' + c.tag).toLowerCase().indexOf(q) !== -1;
+       });
+     }
+     function cards(list) {
+       if (!list.length) return '<p class="empty-note">' + escapeHtml(skin('exploreEmpty', 'Nothing in this room matched that.')) + '</p>';
+       return list.map(function (c) {
+         return '<article class="explore-card"><div class="explore-card-tag">' + escapeHtml(c.tag) +
+           '</div><div class="explore-card-title">' + escapeHtml(c.title) +
+           '</div><div class="explore-card-snippet">' + escapeHtml(c.snippet) + '</div></article>';
+       }).join('');
+     }
+     var seats = nestSeatCards();
+     document.getElementById('explore-pane-places').innerHTML = cards(filt(seats.length ? seats : PLACES));
+     document.getElementById('explore-pane-topics').innerHTML = cards(filt(TOPICS));
+     ensureExploreNestTab();
+     var nestPane = document.getElementById('explore-pane-nests');
+     if (nestPane) fillExploreNests(nestPane, filt(nestExploreCards()));
+   });
   }
 
   var STORIES_TTL_MS = 24 * 60 * 60 * 1000;
@@ -6799,7 +5723,8 @@
     catch (e) { /* private mode */ }
   }
   function findStory(id) {
-    for (var i = 0; i < liveStories.length; i++) if (liveStories[i].id === id) return liveStories[i];
+    if (hiddenIds['story:' + id] || hiddenIds[id]) return null;
+    for (var i = 0; i < liveStories.length; i++) if (liveStories[i].id === id && !isStoryHidden(liveStories[i])) return liveStories[i];
     return null;
   }
   function mapStory(doc) {
@@ -6920,6 +5845,7 @@
     var byUid = {};
     var order = [];
     liveStories.forEach(function (s) {
+      if (isStoryHidden(s)) return;
       if (s.siteId && s.siteId !== SITE_ID) return;
       if (s.expiresAtMs && s.expiresAtMs <= now) return;
       var uid = s.authorUid || s.id;
@@ -7071,59 +5997,41 @@
     }
   }
   function ensureStoriesComposer() {
-    var ov = document.getElementById('stories-composer');
-    if (ov) return ov;
-    ov = document.createElement('div');
-    ov.id = 'stories-composer';
-    ov.className = 'stories-composer-overlay';
-    ov.hidden = true;
-    ov.innerHTML =
-      '<div class="stories-composer" role="dialog" aria-modal="true" aria-labelledby="stories-composer-title">' +
-        '<h2 id="stories-composer-title">Add a story</h2>' +
-        '<p class="stories-composer-note">Lives 24 hours on this room only. Text, a photo, or a short clip.</p>' +
-        '<div class="stories-composer-types">' +
-          '<button type="button" data-story-type="text" class="is-on">Text</button>' +
-          '<button type="button" data-story-type="image">Photo</button>' +
-          '<button type="button" data-story-type="video">Clip</button>' +
-        '</div>' +
-        '<textarea id="stories-composer-text" maxlength="' + STORIES_TEXT_MAX + '" placeholder="' + escapeHtml(storiesComposePlaceholder()) + '"></textarea>' +
-        '<input class="stories-composer-file" id="stories-composer-image" type="file" accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" hidden>' +
-        '<input class="stories-composer-file" id="stories-composer-video" type="file" accept="video/mp4,video/webm,.mp4,.webm" hidden>' +
-        '<div class="stories-composer-preview" id="stories-composer-preview"></div>' +
-        '<input class="stories-composer-caption" id="stories-composer-caption" maxlength="' + STORIES_CAPTION_MAX + '" placeholder="Caption (optional)" hidden>' +
-        '<div class="stories-composer-err" id="stories-composer-err" role="status"></div>' +
-        '<div class="stories-composer-bar">' +
-          '<button type="button" class="stories-composer-close" id="stories-composer-close">Cancel</button>' +
-          '<button type="button" class="stories-composer-post" id="stories-composer-post">Share story</button>' +
-        '</div>' +
-      '</div>';
-    document.body.appendChild(ov);
-    ov.addEventListener('click', function (e) {
-      if (e.target === ov) closeStoriesComposer();
-    });
-    ov.querySelectorAll('[data-story-type]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        setStoryType(btn.getAttribute('data-story-type'));
-        storiesErr('');
-        if (storyType === 'image') {
-          var imgIn = document.getElementById('stories-composer-image');
-          if (imgIn) imgIn.hidden = false;
-        }
-        if (storyType === 'video') {
-          var vidIn = document.getElementById('stories-composer-video');
-          if (vidIn) vidIn.hidden = false;
-        }
-      });
-    });
-    var imgIn = document.getElementById('stories-composer-image');
-    var vidIn = document.getElementById('stories-composer-video');
-    if (imgIn) imgIn.addEventListener('change', function () { onStoryFileChosen(imgIn.files && imgIn.files[0]); });
-    if (vidIn) vidIn.addEventListener('change', function () { onStoryFileChosen(vidIn.files && vidIn.files[0]); });
-    var closeBtn = document.getElementById('stories-composer-close');
-    if (closeBtn) closeBtn.addEventListener('click', function () { closeStoriesComposer(); });
-    var postBtn = document.getElementById('stories-composer-post');
-    if (postBtn) postBtn.addEventListener('click', submitStory);
-    return ov;
+   var ov = document.getElementById('stories-composer');
+   if (ov) return ov;
+   ov = document.createElement('div');
+   ov.id = 'stories-composer';
+   ov.className = 'stories-composer-overlay';
+   ov.hidden = true;
+   ov.innerHTML =
+     '<div class="stories-composer" role="dialog" aria-modal="true" aria-labelledby="stories-composer-title"><h2 id="stories-composer-title">Add a story</h2><p class="stories-composer-note">Lives 24 hours on this room only. Text, a photo, or a short clip.</p><div class="stories-composer-types"><button type="button" data-story-type="text" class="is-on">Text</button><button type="button" data-story-type="image">Photo</button><button type="button" data-story-type="video">Clip</button></div><textarea id="stories-composer-text" maxlength="' + STORIES_TEXT_MAX + '" placeholder="' + escapeHtml(storiesComposePlaceholder()) + '"></textarea><input class="stories-composer-file" id="stories-composer-image" type="file" accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" hidden><input class="stories-composer-file" id="stories-composer-video" type="file" accept="video/mp4,video/webm,.mp4,.webm" hidden><div class="stories-composer-preview" id="stories-composer-preview"></div><input class="stories-composer-caption" id="stories-composer-caption" maxlength="' + STORIES_CAPTION_MAX + '" placeholder="Caption (optional)" hidden><div class="stories-composer-err" id="stories-composer-err" role="status"></div><div class="stories-composer-bar"><button type="button" class="stories-composer-close" id="stories-composer-close">Cancel</button><button type="button" class="stories-composer-post" id="stories-composer-post">Share story</button></div></div>';
+   document.body.appendChild(ov);
+   ov.addEventListener('click', function (e) {
+     if (e.target === ov) closeStoriesComposer();
+   });
+   ov.querySelectorAll('[data-story-type]').forEach(function (btn) {
+     btn.addEventListener('click', function () {
+       setStoryType(btn.getAttribute('data-story-type'));
+       storiesErr('');
+       if (storyType === 'image') {
+         var imgIn = document.getElementById('stories-composer-image');
+         if (imgIn) imgIn.hidden = false;
+       }
+       if (storyType === 'video') {
+         var vidIn = document.getElementById('stories-composer-video');
+         if (vidIn) vidIn.hidden = false;
+       }
+     });
+   });
+   var imgIn = document.getElementById('stories-composer-image');
+   var vidIn = document.getElementById('stories-composer-video');
+   if (imgIn) imgIn.addEventListener('change', function () { onStoryFileChosen(imgIn.files && imgIn.files[0]); });
+   if (vidIn) vidIn.addEventListener('change', function () { onStoryFileChosen(vidIn.files && vidIn.files[0]); });
+   var closeBtn = document.getElementById('stories-composer-close');
+   if (closeBtn) closeBtn.addEventListener('click', function () { closeStoriesComposer(); });
+   var postBtn = document.getElementById('stories-composer-post');
+   if (postBtn) postBtn.addEventListener('click', submitStory);
+   return ov;
   }
   function openStoriesComposer(force) {
     if (!storiesOn()) return;
@@ -7266,61 +6174,49 @@
     return 5500;
   }
   function paintStoryViewer() {
-    var el = document.getElementById('stories-viewer');
-    if (!el) return;
-    var story = storyViewerList[storyViewerIdx];
-    if (!story) { closeStoriesViewer(); return; }
-    markStoriesSeen([story.id]);
-    var segs = storyViewerList.map(function (_, i) {
-      var cls = i < storyViewerIdx ? ' is-done' : (i === storyViewerIdx ? ' is-active' : '');
-      var dur = storyAdvanceMs(storyViewerList[i]);
-      var style = (i === storyViewerIdx && dur) ? ('animation-duration:' + dur + 'ms') : '';
-      return '<div class="stories-progress-seg' + cls + '"><span class="stories-progress-fill" style="' + style + '"></span></div>';
-    }).join('');
-    var ago = Math.max(0, Math.round((Date.now() - (story.ms || Date.now())) / 3600000));
-    var when = ago < 1 ? 'now' : (ago + 'h');
-    var media = '';
-    if (story.type === 'image' && story.mediaUrl) {
-      media = '<img src="' + escapeHtml(story.mediaUrl) + '" alt="">';
-    } else if (story.type === 'video' && story.mediaUrl) {
-      var auto = storiesReduceMotion() ? '' : ' autoplay';
-      media = '<video src="' + escapeHtml(story.mediaUrl) + '" playsinline' + auto + ' controls></video>';
-    } else {
-      media = '<div class="stories-text-card"><p>' + escapeHtml(story.text || '') + '</p></div>';
-    }
-    var caption = (story.type !== 'text' && story.text)
-      ? '<div class="stories-caption">' + escapeHtml(story.text) + '</div>'
-      : '';
-    var canReport = isLiveUser() && story.authorUid && story.authorUid !== liveUid();
-    el.innerHTML =
-      '<div class="stories-viewer-card">' +
-        '<div class="stories-progress">' + segs + '</div>' +
-        '<div class="stories-viewer-top">' +
-          '<div class="stories-avatar" style="width:32px;height:32px;font-size:0.65rem;background:' + colorFor(story.handle) + '">' + escapeHtml(initials(story.name)) + '</div>' +
-          '<div><div class="stories-viewer-who">' + escapeHtml(story.name) + '</div>' +
-          '<div class="stories-viewer-meta">@' + escapeHtml(story.handle) + ' · ' + when + '</div></div>' +
-          '<button type="button" class="stories-viewer-close" data-story-ui="close" aria-label="Close">&times;</button>' +
-        '</div>' +
-        '<div class="stories-stage">' +
-          media + caption +
-          '<button type="button" class="stories-stage-hit prev" data-story-ui="prev" aria-label="Previous"></button>' +
-          '<button type="button" class="stories-stage-hit next" data-story-ui="next" aria-label="Next"></button>' +
-        '</div>' +
-        '<div class="stories-viewer-actions">' +
-          (canReport ? '<button type="button" data-story-ui="report">Report</button>' : '') +
-          (story.authorUid === liveUid() ? '<button type="button" data-story-ui="delete">Delete</button>' : '') +
-        '</div>' +
-      '</div>';
-    clearStoryViewerTimer();
-    var ms = storyAdvanceMs(story);
-    if (ms) {
-      storyViewerTimer = setTimeout(function () { stepStoriesViewer(1); }, ms);
-    }
-    var vid = el.querySelector('video');
-    if (vid && !storiesReduceMotion()) {
-      vid.addEventListener('ended', function () { stepStoriesViewer(1); });
-    }
-    syncStoriesTray();
+   var el = document.getElementById('stories-viewer');
+   if (!el) return;
+   var story = storyViewerList[storyViewerIdx];
+   if (!story || isStoryHidden(story)) { closeStoriesViewer(); return; }
+   markStoriesSeen([story.id]);
+   var segs = storyViewerList.map(function (_, i) {
+     var cls = i < storyViewerIdx ? ' is-done' : (i === storyViewerIdx ? ' is-active' : '');
+     var dur = storyAdvanceMs(storyViewerList[i]);
+     var style = (i === storyViewerIdx && dur) ? ('animation-duration:' + dur + 'ms') : '';
+     return '<div class="stories-progress-seg' + cls + '"><span class="stories-progress-fill" style="' + style + '"></span></div>';
+   }).join('');
+   var ago = Math.max(0, Math.round((Date.now() - (story.ms || Date.now())) / 3600000));
+   var when = ago < 1 ? 'now' : (ago + 'h');
+   var media = '';
+   if (story.type === 'image' && story.mediaUrl) {
+     media = '<img src="' + escapeHtml(story.mediaUrl) + '" alt="">';
+   } else if (story.type === 'video' && story.mediaUrl) {
+     var auto = storiesReduceMotion() ? '' : ' autoplay';
+     media = '<video src="' + escapeHtml(story.mediaUrl) + '" playsinline' + auto + ' controls></video>';
+   } else {
+     media = '<div class="stories-text-card"><p>' + escapeHtml(story.text || '') + '</p></div>';
+   }
+   var caption = (story.type !== 'text' && story.text)
+     ? '<div class="stories-caption">' + escapeHtml(story.text) + '</div>'
+     : '';
+   var canReport = isLiveUser() && story.authorUid && story.authorUid !== liveUid();
+   el.innerHTML =
+     '<div class="stories-viewer-card"><div class="stories-progress">' + segs + '</div><div class="stories-viewer-top"><div class="stories-avatar" style="width:32px;height:32px;font-size:0.65rem;background:' + colorFor(story.handle) + '">' + escapeHtml(initials(story.name)) + '</div><div><div class="stories-viewer-who">' + escapeHtml(story.name) + '</div><div class="stories-viewer-meta">@' + escapeHtml(story.handle) + ' · ' + when + '</div></div><button type="button" class="stories-viewer-close" data-story-ui="close" aria-label="Close">&times;</button></div><div class="stories-stage">' +
+         media + caption +
+         '<button type="button" class="stories-stage-hit prev" data-story-ui="prev" aria-label="Previous"></button><button type="button" class="stories-stage-hit next" data-story-ui="next" aria-label="Next"></button></div><div class="stories-viewer-actions">' +
+         (canReport ? '<button type="button" data-story-ui="report">Report</button>' : '') +
+         (story.authorUid === liveUid() ? '<button type="button" data-story-ui="delete">Delete</button>' : '') +
+       '</div></div>';
+   clearStoryViewerTimer();
+   var ms = storyAdvanceMs(story);
+   if (ms) {
+     storyViewerTimer = setTimeout(function () { stepStoriesViewer(1); }, ms);
+   }
+   var vid = el.querySelector('video');
+   if (vid && !storiesReduceMotion()) {
+     vid.addEventListener('ended', function () { stepStoriesViewer(1); });
+   }
+   syncStoriesTray();
   }
   function stepStoriesViewer(dir) {
     var next = storyViewerIdx + (dir < 0 ? -1 : 1);
@@ -7368,21 +6264,28 @@
       }
     }
   }
-  function reportStory(id) {
+  function reportStory(id, optReason) {
     if (!requireVerified('report')) return;
     var story = findStory(id);
     if (!story || !fbDb) return;
-    fbDb.collection('reports').add({
-      siteId: SITE_ID,
-      storyId: id,
-      postId: 'story:' + id,
-      targetUid: story.authorUid || '',
-      reporterUid: liveUid(),
-      reason: 'abuse',
-      status: 'open',
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    }).then(function () {
-      toast('Reported. Thanks.');
+    if (!optReason) { pickReportReason(function (r) { if (r) reportStory(id, r); }); return; }
+    var reason = optReason, me = liveUid(), pid = 'story:' + id;
+    var addOnly = function () {
+      return fbDb.collection('reports').add({
+        siteId: SITE_ID,
+        storyId: id,
+        postId: pid,
+        targetUid: story.authorUid || '',
+        reporterUid: me,
+        reason: reason,
+        status: 'open',
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    };
+    var op = HIDE_REASONS[reason] ? commitAutoHideReport(pid, story.authorUid || '', id, reason, addOnly) : addOnly();
+    op.then(function () {
+      toast(HIDE_REASONS[reason] ? 'Reported and hidden pending review.' : 'Reported. Thanks.');
+      writeReportAlert({ id: pid, text: story.text || '' }, me, reason);
     }).catch(function (e) {
       toast(reportErr(e));
     });
@@ -7452,12 +6355,9 @@
       html +=
         '<button type="button" class="' + addCls + '"' +
           (hasMine ? ' data-story-uid="' + escapeHtml(me) + '"' : ' data-story-add="1"') +
-          ' aria-label="' + (hasMine ? 'Your story' : 'Add story') + '">' +
-          '<span class="stories-ring">' +
+          ' aria-label="' + (hasMine ? 'Your story' : 'Add story') + '"><span class="stories-ring">' +
             storyTrayAvatarHtml(myLatest, (currentUser && currentUser.name) || 'Me', (currentUser && currentUser.handle) || 'me') +
-            '<span class="stories-add-badge" data-story-add="1">+</span></span>' +
-          '<span class="stories-label">' + (hasMine ? 'Your story' : 'Add story') + '</span>' +
-        '</button>';
+            '<span class="stories-add-badge" data-story-add="1">+</span></span><span class="stories-label">' + (hasMine ? 'Your story' : 'Add story') + '</span></button>';
     }
     groups.forEach(function (g) {
       var latest = latestStory(g.stories);
@@ -7466,10 +6366,7 @@
       var unseen = groupHasUnseen(g.stories);
       html +=
         '<button type="button" class="stories-item' + (unseen ? '' : ' is-seen') + '" data-story-uid="' +
-          escapeHtml(g.uid) + '" role="listitem">' +
-          '<span class="stories-ring">' + storyTrayAvatarHtml(latest) + '</span>' +
-          '<span class="stories-label">' + escapeHtml(latest.name) + '</span>' +
-        '</button>';
+          escapeHtml(g.uid) + '" role="listitem"><span class="stories-ring">' + storyTrayAvatarHtml(latest) + '</span><span class="stories-label">' + escapeHtml(latest.name) + '</span></button>';
     });
     el.innerHTML = html;
     primeStoryTrayThumbs(el);
@@ -7537,11 +6434,8 @@
           var el = ensureStoriesTray();
           el.hidden = false;
           el.innerHTML =
-            '<button type="button" class="stories-item is-add" data-story-add="1" aria-label="Add story">' +
-              '<span class="stories-ring"><span class="stories-avatar" style="background:' + colorFor(SITE_ID || 'room') + '">' +
-              escapeHtml(String(SITE_ID || 'room').replace(/chat$/i, '').slice(0, 3).toUpperCase() || 'ME') + '</span>' +
-              '<span class="stories-add-badge">+</span></span>' +
-              '<span class="stories-label">Add story</span></button>';
+            '<button type="button" class="stories-item is-add" data-story-add="1" aria-label="Add story"><span class="stories-ring"><span class="stories-avatar" style="background:' + colorFor(SITE_ID || 'room') + '">' +
+              escapeHtml(String(SITE_ID || 'room').replace(/chat$/i, '').slice(0, 3).toUpperCase() || 'ME') + '</span><span class="stories-add-badge">+</span></span><span class="stories-label">Add story</span></button>';
         },
         setDemo: function (list, ownUid) {
           if (storiesUnsub) { storiesUnsub(); storiesUnsub = null; }
@@ -7588,6 +6482,7 @@
     syncChatChrome();
 
     wireEvents();
+    applyAccountsGate();
     document.addEventListener('subx-auth-land', function () { landInFeedCompose(); });
     renderTrends();
     renderExplore();
@@ -7620,6 +6515,7 @@
       if (fbAuth) {
         fbAuth.getRedirectResult().then(function (cred) {
           var u = cred && cred.user;
+          if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut();
           if (fbDb && u) {
             return ensurePublicProfile(u, '', {
               provider: 'google',
@@ -7651,6 +6547,7 @@
         });
       }
       listenKillSwitch();
+      listenHides();
       listenLivePosts();
       initStories();
     });
