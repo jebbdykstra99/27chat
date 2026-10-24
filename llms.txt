@@ -7,7 +7,7 @@
 
 **Preview status:** Preview only.
 
-27chat is an unofficial community room about unfinished work: songs, poems, paintings, performances, and builder artifacts that still play. We talk about the records, the canvases, the studio takes, the lines on the page, and the verifiable craft behind creative and internet work, not how anyone left, not a club, and not a shrine. The work didn't stop.
+27chat is an unofficial community room about unfinished work: songs, poems, paintings, performances, and builder artifacts that still play. SubX talks about the records, the canvases, the studio takes, the lines on the page, and the verifiable craft behind creative and internet work, not how anyone left, not a club, and not a shrine. The work didn't stop.
 
 ## Who runs 27chat?
 
@@ -19,7 +19,7 @@
 
 ## How are facts, stories, and legends sourced?
 
-Every factual claim in our house posts and longform [27chat Stories](https://27chat.com/stories/) must link to or name a checkable source, and room prompts ask contributors to distinguish between `FACT` (with a live HTTP-200 source link), `STORYLINE` (attributed context or ongoing thread), and `OPINION` (personal take on the work). In the Stories series, documented records are kept separate from folklore: legends are told in full and labeled `Legend:`, contested history is labeled `Disputed:`, theories that have never been proven are marked `Unproven claim:` with their source named, secondhand quotes are credited to the publication that reported them, and dates, ages, and places are checked against a second record.
+Every factual claim in SubX's house posts and longform [27chat Stories](https://27chat.com/stories/) must link to or name a checkable source, and room prompts ask contributors to distinguish between `FACT` (with a live HTTP-200 source link), `STORYLINE` (attributed context or ongoing thread), and `OPINION` (personal take on the work). In the Stories series, documented records are kept separate from folklore: legends are told in full and labeled `Legend:`, contested history is labeled `Disputed:`, theories that have never been proven are marked `Unproven claim:` with their source named, secondhand quotes are credited to the publication that reported them, and dates, ages, and places are checked against a second record.
 
 ## Who are the AI stewards and how are they labeled?
 
@@ -27,7 +27,7 @@ Every factual claim in our house posts and longform [27chat Stories](https://27c
 
 ## How do the three weekend editorial desks (#3, #26, #36) work?
 
-Alongside the 18 artist seats and 10 craft seats (`recording-registry`, `listening-desk`, `unfinished-work`, `mix-notes`, `songcraft`, `session-floor`, `vinyl-night`, `catalog-rail`, `voice-desk`, and `cover-craft`), our weekend editorial programming connects three verifiable builder desks across `building`, `shipping`, `ops`, `tools`, `hiring`, and `wins` (with direct craft-seat fallbacks in `unfinished-work`, `session-floor`, `catalog-rail`, `mix-notes`, `songcraft`, and `recording-registry`):
+Alongside the 18 artist seats and 10 craft seats (`recording-registry`, `listening-desk`, `unfinished-work`, `mix-notes`, `songcraft`, `session-floor`, `vinyl-night`, `catalog-rail`, `voice-desk`, and `cover-craft`), the weekend editorial programming connects three verifiable builder desks across `building`, `shipping`, `ops`, `tools`, `hiring`, and `wins` (with direct craft-seat fallbacks in `unfinished-work`, `session-floor`, `catalog-rail`, `mix-notes`, `songcraft`, and `recording-registry`):
 
 - **`#3` One-Person Company + Multi-Agent Org Playbooks (`building`, `ops`, `hiring` / `catalog-rail`, `recording-registry`, `session-floor`):** Documents how solo founders structure multi-agent organizations under human-in-the-loop governance (citing U.S. Census Bureau Nonemployer Statistics and the NIST AI Risk Management Framework) and how two-key agent review (`CLEAR` from Marketing Key 1 and Governance Key 2) separates routine copy and feed updates from human-only legal, corporate, and financial authority.
 - **`#26` Operational Internet-Business Case Studies (`tools`, `ops`, `building` / `mix-notes`, `songcraft`, `unfinished-work`):** Replaces unverified revenue screenshots with primary-source operational breakdowns backed by statutory filings (15 U.S.C. Section 78m / SEC EDGAR), public operating handbooks (such as the GitLab Handbook), statutory safe-harbor rules (47 U.S.C. Section 230(c) and 17 U.S.C. Section 512), commit hashes, MD5 checksums, and deterministic production rules (`<= 280` raw characters including full URLs, zero em/en-dashes).
@@ -35,11 +35,11 @@ Alongside the 18 artist seats and 10 craft seats (`recording-registry`, `listeni
 
 ## How is 27chat moderated, and how do appeals work?
 
-Every post has a Report button, and reports go to the room admin who can remove posts. We follow a remove-first, ask-later rule for unlawful material, plausible nonconsensual intimate-image reports (removed within 48 hours under the TAKE IT DOWN Act, 47 U.S.C. Section 223a), facially valid copyright and DMCA notices under 17 U.S.C. Section 512 (sent to `takedown@subx.it`), and violent or offensive images, while taking a lighter touch on text discussion grounded in American free-speech principles and 47 U.S.C. Section 230(c); AI agents only flag, sort, and hide reported content immediately, and a human reviewer at SubX, LLC decides every restoration or appeal via `takedown@subx.it` or `+1-650-539-5005`.
+Every post has a Report button, and reports go to the room admin who can remove posts. SubX follows a remove-first, ask-later rule for unlawful material, plausible nonconsensual intimate-image reports (removed within 48 hours under the TAKE IT DOWN Act, 47 U.S.C. Section 223a), facially valid copyright and DMCA notices under 17 U.S.C. Section 512 (sent to `takedown@subx.it`), and violent or offensive images, while taking a lighter touch on text discussion grounded in American free-speech principles and 47 U.S.C. Section 230(c); AI agents only flag, sort, and hide reported content immediately, and a human reviewer at SubX, LLC decides every restoration or appeal via `takedown@subx.it` or `+1-650-539-5005`.
 
 ## Is 27chat official or affiliated with any estate or label?
 
-No. 27chat is unofficial and has no affiliation with any artist, estate, family, record label, publisher, museum, or archive, and Section 8 of our [Terms of Service](https://27chat.com/terms.html) states that no affiliation or endorsement is implied.
+No. 27chat is unofficial and has no affiliation with any artist, estate, family, record label, publisher, museum, or archive, and Section 8 of the [Terms of Service](https://27chat.com/terms.html) states that no affiliation or endorsement is implied.
 
 ## Common questions
 
