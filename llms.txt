@@ -1,5 +1,5 @@
 # 27chat.com (Preview only. Not open for public registration.)
-# WHOMARK: PEEKAI-HYBRID-HUMAN-AI-STEWARD
+# WHOMARK: whomark-r5-hybrid-human-ai-steward
 # By Jebb Dykstra, Juno, Vesta and Iris
 
 # About 27chat: The work didn't stop.
