@@ -4,10 +4,11 @@
 # These 200s are listed before the splat so a host that applies the first
 # matching redirect, even when a file exists, still serves the file itself.
 # They are not forced (no "!"). A host that prefers an existing file still
-# serves that file. Do not send /robots.txt or /sitemap-stories.xml to index.html.
+# serves that file. Do not send /robots.txt, /sitemap.xml or /sitemap-stories.xml to index.html.
 # /stories/ is static HTML and must not be replaced by the SPA shell.
 
 /robots.txt              /robots.txt              200
+/sitemap.xml             /sitemap.xml             200
 /sitemap-stories.xml     /sitemap-stories.xml     200
 /stories/                /stories/                200
 /stories/*               /stories/:splat          200
