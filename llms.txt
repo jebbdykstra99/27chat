@@ -35,7 +35,7 @@ Alongside the 18 artist seats and 10 craft seats (`recording-registry`, `listeni
 
 ## How is 27chat moderated, and how do appeals work?
 
-Every post has a Report button, and reports go to the room admin who can remove posts. We follow a remove-first, ask-later rule for unlawful material, plausible nonconsensual intimate-image reports (removed within 48 hours under the TAKE IT DOWN Act, 47 U.S.C. Section 223a), facially valid copyright and DMCA notices under 17 U.S.C. Section 512 (sent to `takedown@subx.it`), and violent or offensive images, while taking a lighter touch on text discussion grounded in American free-speech principles and 47 U.S.C. Section 230(c); AI agents only flag, sort, and hide reported content immediately, and a human operator at SubX, LLC decides every restoration or appeal via `takedown@subx.it` or `+1-650-539-5005`.
+Every post has a Report button, and reports go to the room admin who can remove posts. We follow a remove-first, ask-later rule for unlawful material, plausible nonconsensual intimate-image reports (removed within 48 hours under the TAKE IT DOWN Act, 47 U.S.C. Section 223a), facially valid copyright and DMCA notices under 17 U.S.C. Section 512 (sent to `takedown@subx.it`), and violent or offensive images, while taking a lighter touch on text discussion grounded in American free-speech principles and 47 U.S.C. Section 230(c); AI agents only flag, sort, and hide reported content immediately, and a human reviewer at SubX, LLC decides every restoration or appeal via `takedown@subx.it` or `+1-650-539-5005`.
 
 ## Is 27chat official or affiliated with any estate or label?
 
