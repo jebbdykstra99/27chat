@@ -151,7 +151,7 @@
     {
       "tag": "Work",
       "title": "The Soldier",
-      "snippet": "Rupert Brooke. The 1914 sonnet. If I should die, think only this of me — the line is the work."
+      "snippet": "Rupert Brooke. The 1914 sonnet. If I should die, think only this of me. The line is the work."
     },
     {
       "tag": "Work",
@@ -178,7 +178,7 @@
     {
       "tag": "Voice",
       "title": "Brian Jones",
-      "snippet": "Early Stones palette — slide, marimba. The founding sound, not the folklore."
+      "snippet": "Early Stones palette: slide, marimba. The founding sound, not the folklore."
     },
     {
       "tag": "Voice",
@@ -193,12 +193,12 @@
     {
       "tag": "Voice",
       "title": "Jim Morrison",
-      "snippet": "The Doors — the long song as a room you can still enter. Poet first tonight."
+      "snippet": "The Doors: the long song as a room you can still enter. Poet first tonight."
     },
     {
       "tag": "Voice",
       "title": "Ron Pigpen McKernan",
-      "snippet": "Turn On Your Love Light. Organ, shout — blues as the first language."
+      "snippet": "Turn On Your Love Light. Organ, shout: blues as the first language."
     },
     {
       "tag": "Voice",
@@ -258,10 +258,10 @@
     {
       "tag": "Voice",
       "title": "Kim Jong-hyun",
-      "snippet": "Replay / SHINee. Writing and falsetto — the song still arrives like a letter."
+      "snippet": "Replay / SHINee. Writing and falsetto: the song still arrives like a letter."
     }
   ],
-  "seedNote": "sample — not mixed into the live feed",
+  "seedNote": "sample, not mixed into the live feed",
   "stories": {
     "enabled": true,
     "maxSeconds": 15,
@@ -293,7 +293,7 @@
         "url": "/stories/05-kurt-cobain/"
       },
       {
-        "headline": "Robert Johnson's Work: The 1936–37 Sessions, 29 Songs, and the Crossroads Legend",
+        "headline": "Robert Johnson's Work: The 1936 to 1937 Sessions, 29 Songs, and the Crossroads Legend",
         "url": "/stories/04-robert-johnson/"
       },
       {
@@ -321,7 +321,7 @@
         "tag": "Watch",
         "headline": "Are You Experienced",
         "url": "https://open.spotify.com/album/7rSZXXHHvIhF4yUFdaOCy9",
-        "snippet": "Official Spotify album page. Outbound only — no in-app re-stream. Work-first / no Club 27 memorial.",
+        "snippet": "Official Spotify album page. Outbound only, no in-app re-stream. Work-first / no Club 27 memorial.",
         "meta": "Official · link-out"
       }
     ]
@@ -371,7 +371,7 @@
         "id": "jim-morrison",
         "label": "Jim Morrison",
         "kind": "other",
-        "blurb": "The Doors — the long song as a room you can still enter. Poet first.",
+        "blurb": "The Doors: the long song as a room you can still enter. Poet first.",
         "followDefault": true,
         "adminSeed": true,
         "status": "active"
@@ -380,7 +380,7 @@
         "id": "brian-jones",
         "label": "Brian Jones",
         "kind": "other",
-        "blurb": "Early Stones palette — slide, marimba. The founding sound.",
+        "blurb": "Early Stones palette: slide, marimba. The founding sound.",
         "followDefault": true,
         "adminSeed": true,
         "status": "active"
@@ -521,7 +521,7 @@
       "label": "Brian Jones",
       "parent": "voices",
       "kind": "people",
-      "blurb": "Early Stones palette — slide, marimba. The founding sound, not the folklore.",
+      "blurb": "Early Stones palette: slide, marimba. The founding sound, not the folklore.",
       "nav": true
     },
     {
@@ -546,7 +546,7 @@
       "label": "Jim Morrison",
       "parent": "voices",
       "kind": "people",
-      "blurb": "The Doors — the long song as a room you can still enter. Poet first tonight.",
+      "blurb": "The Doors: the long song as a room you can still enter. Poet first tonight.",
       "story": "/stories/01-jim-morrison-paris/",
       "nav": true
     },
@@ -555,7 +555,7 @@
       "label": "Ron Pigpen McKernan",
       "parent": "voices",
       "kind": "people",
-      "blurb": "Turn On Your Love Light. Organ, shout — blues as the first language.",
+      "blurb": "Turn On Your Love Light. Organ, shout: blues as the first language.",
       "nav": true
     },
     {
@@ -653,7 +653,7 @@
       "label": "Kim Jong-hyun",
       "parent": "voices",
       "kind": "people",
-      "blurb": "Replay / SHINee. Writing and falsetto — the song still arrives like a letter.",
+      "blurb": "Replay / SHINee. Writing and falsetto: the song still arrives like a letter.",
       "nav": true
     },
     {
@@ -661,7 +661,7 @@
       "label": "Recording Registry",
       "parent": "archive",
       "kind": "theme",
-      "blurb": "Work selected for preservation — catalog talk, not a memorial wall.",
+      "blurb": "Work selected for preservation: catalog talk, not a memorial wall.",
       "nav": true
     },
     {
@@ -677,7 +677,7 @@
       "label": "Unfinished Work",
       "parent": "listening",
       "kind": "theme",
-      "blurb": "Demos, vaults, WIP as craft — what the take still asks.",
+      "blurb": "Demos, vaults, WIP as craft: what the take still asks.",
       "nav": true
     },
     {
@@ -685,7 +685,7 @@
       "label": "Mix Notes",
       "parent": "studio",
       "kind": "theme",
-      "blurb": "Arrangement, mix, master — how the record was built.",
+      "blurb": "Arrangement, mix, master: how the record was built.",
       "nav": true
     },
     {
@@ -701,7 +701,7 @@
       "label": "Session Floor",
       "parent": "studio",
       "kind": "theme",
-      "blurb": "Players, takes, room sound — labor in the room.",
+      "blurb": "Players, takes, room sound: labor in the room.",
       "nav": true
     },
     {
@@ -709,7 +709,7 @@
       "label": "Vinyl Night",
       "parent": "listening",
       "kind": "theme",
-      "blurb": "Physical media listening desk — editions that still spin.",
+      "blurb": "Physical media listening desk: editions that still spin.",
       "nav": true
     },
     {
@@ -717,7 +717,7 @@
       "label": "Catalog Rail",
       "parent": "archive",
       "kind": "theme",
-      "blurb": "Discography, credits, versions — who played what.",
+      "blurb": "Discography, credits, versions: who played what.",
       "nav": true
     },
     {
@@ -725,7 +725,7 @@
       "label": "Voice Desk",
       "parent": "studio",
       "kind": "theme",
-      "blurb": "Voice as instrument — phrasing, grain, arrangement lift.",
+      "blurb": "Voice as instrument: phrasing, grain, arrangement lift.",
       "nav": true
     },
     {
@@ -733,7 +733,7 @@
       "label": "Cover Craft",
       "parent": "listening",
       "kind": "theme",
-      "blurb": "Reinterpretation as labor — arrangement choices, not tribute shrine.",
+      "blurb": "Reinterpretation as labor: arrangement choices, not tribute shrine.",
       "nav": true
     }
   ],
