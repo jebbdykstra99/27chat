@@ -4,11 +4,11 @@
   "room": "27chat",
   "siteId": "27chat",
   "files": {
-    "factory.js": "3ca317ef3b982204ed82e7385251a1316dda27974f9a48a06229cae1ac0dfed5",
+    "factory.js": "4d9966698975cb4676a77cb81913223762eebfd3612a969ddcfd7740ecf37fe7",
     "styles.css": "c4f16056699ba4450c1633caeb032b8f5680d92229c56b4c595cca0e82a70342"
   },
   "keepFiles": [],
   "exceptions": "see subx-factory EXCEPTIONS.md",
-  "stampedAt": "2026-10-24T14:35:00Z",
-  "masterRef": "subx-factory main @ cb86a9b (FACTORY_RELEASE.json v1.2.5)"
+  "stampedAt": "2026-10-26T14:05:00Z",
+  "masterRef": "subx-factory main @ 346b55e (FACTORY_RELEASE.json v1.2.5)"
 }
