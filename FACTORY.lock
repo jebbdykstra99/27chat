@@ -1,14 +1,14 @@
 {
   "factory": "jebbdykstra99/subx-factory",
-  "version": "v1.0.1+nr",
+  "version": "v1.0.1+nr (hand lock 2026-10-30)",
   "room": "27chat",
   "siteId": "27chat",
   "files": {
-    "factory.js": "a90e69ba13409b24ca19ff6be48c14e727ecc0c2f733fe44c4030539f9e9079b",
-    "styles.css": "71f993c10af261b634c238be982ed0eb6a8d1ba1870435ab3702822fd7e093e9"
+    "factory.js": "3ca317ef3b982204ed82e7385251a1316dda27974f9a48a06229cae1ac0dfed5",
+    "styles.css": "c4f16056699ba4450c1633caeb032b8f5680d92229c56b4c595cca0e82a70342"
   },
   "keepFiles": [],
   "exceptions": "see subx-factory EXCEPTIONS.md",
-  "stampedAt": "2026-10-19T14:00:00Z",
+  "stampedAt": "2026-10-30T13:30:00Z",
   "masterRef": "subx-factory factory/v1.0.0 @ aaf157f"
 }
