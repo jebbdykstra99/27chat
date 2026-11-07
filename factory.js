@@ -364,11 +364,11 @@
     if (/аdmin|аdministrator|οfficial|оfficial/i.test(s)) return false;
     return true;
   }
-  function handleOk(h) {
+  function handleOk(h, uid) {
     return typeof h === 'string'
       && /^[a-z0-9_]{1,15}$/.test(h)
       && !HANDLE_EXACT[h]
-      && !/^(admin|moderator|official|subx|jebb)/.test(h)
+      && (uid === ADMIN_UID || !/^(admin|moderator|official|subx|jebb)/.test(h))
       && !/(adm1n|4dmin|0fficial|st3ward)/.test(h);
   }
   function fourDigits() {
@@ -376,16 +376,96 @@
     while (s.length < 4) s = '0' + s;
     return s;
   }
-  function handleFromName(name) {
+  function handleFromName(name, uid) {
     var h = String(name || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 15);
     if (!h) h = 'fan';
-    if (handleOk(h)) return h;
+    if (handleOk(h, uid)) return h;
     var digits = fourDigits();
     var withDigits = (h + digits).slice(0, 15);
-    if (handleOk(withDigits)) return withDigits;
+    if (handleOk(withDigits, uid)) return withDigits;
     var prefixed = ('f' + digits + h).replace(/[^a-z0-9_]/g, '').slice(0, 15);
-    if (handleOk(prefixed)) return prefixed;
+    if (handleOk(prefixed, uid)) return prefixed;
     return ('fan' + digits).slice(0, 15);
+  }
+  var knownHandles = {};
+  var handleFetches = {};
+  function rememberHandle(uid, h) {
+    if (uid && typeof h === 'string' && /^[a-z0-9_]{1,15}$/.test(h)) knownHandles[uid] = h;
+  }
+  function shownHandle(uid, stored, name) {
+    var known = uid && knownHandles[uid];
+    if (known) return known;
+    if (stored && /^[a-z0-9_]{1,15}$/.test(stored)) return stored;
+    return String(name || 'member').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+  }
+  function hydrateHandle(uid) {
+    if (!fbDb || !uid || handleFetches[uid]) return;
+    handleFetches[uid] = 1;
+    fbDb.collection('users').doc(uid).get().then(function (snap) {
+      var h = snap.exists && (snap.data() || {}).handle;
+      if (!h || !/^[a-z0-9_]{1,15}$/.test(h)) return;
+      rememberHandle(uid, h);
+      if (viewingProfile && viewingProfile.uid === uid && viewingProfile.handle !== h) {
+        viewingProfile.handle = h;
+        syncProfile();
+      }
+      renderThreads();
+    }).catch(function () {});
+  }
+  // users/{uid} is one doc per Firebase uid (siteId is a field). handles/{handle} matches that scope.
+  function claimHandle(uid, name, preferred) {
+    if (!fbDb || !uid) return Promise.resolve(preferred || '');
+    if (!accountsOpen() && uid !== ADMIN_UID) return Promise.resolve(preferred || '');
+    var userRef = fbDb.collection('users').doc(uid);
+    var tries = 0;
+    function writeUser(handle) {
+      var patch = { handle: handle };
+      if (SITE_ID) patch.siteId = SITE_ID;
+      return userRef.set(patch, { merge: true }).then(function () { return handle; });
+    }
+    function keepStored() {
+      return userRef.get().then(function (snap) {
+        var existing = snap.exists && (snap.data() || {}).handle;
+        if (existing && handleOk(existing, uid)) return writeUser(existing);
+        return writeUser(handleFromName(name, uid));
+      });
+    }
+    function attempt() {
+      var candidate = (!tries && preferred && handleOk(preferred, uid)) ? preferred : handleFromName(name, uid);
+      tries++;
+      if (typeof fbDb.runTransaction !== 'function') return keepStored();
+      var freshRef = fbDb.collection('handles').doc(candidate);
+      return fbDb.runTransaction(function (tx) {
+        return tx.get(userRef).then(function (userSnap) {
+          var existing = userSnap.exists ? String((userSnap.data() || {}).handle || '') : '';
+          var keep = !!(existing && handleOk(existing, uid));
+          var handle = keep ? existing : candidate;
+          var ref = keep ? fbDb.collection('handles').doc(existing) : freshRef;
+          return tx.get(ref).then(function (hSnap) {
+            var owner = hSnap.exists ? String((hSnap.data() || {}).uid || '') : '';
+            if (!keep && owner && owner !== uid) {
+              var err = new Error('handle taken');
+              err.code = 'handle-taken';
+              throw err;
+            }
+            var patch = { handle: handle };
+            if (SITE_ID) patch.siteId = SITE_ID;
+            tx.set(userRef, patch, { merge: true });
+            if (!hSnap.exists) {
+              var claim = { uid: uid };
+              if (SITE_ID) claim.siteId = SITE_ID;
+              tx.set(ref, claim);
+            }
+            return handle;
+          });
+        });
+      }).catch(function (e) {
+        if (e && (e.code === 'handle-taken' || /handle taken/.test(String(e.message || ''))) && tries < 6) return attempt();
+        if (isPermDenied(e)) return keepStored();
+        return Promise.reject(e);
+      });
+    }
+    return attempt();
   }
   function fanNameStored(uid) {
     var key = 'subx.fanName.v1.' + String(uid || 'anon');
@@ -414,24 +494,25 @@
   }
   function memberIdentity(user, typedName) {
     var typed = String(typedName || '').trim();
+    var uid = user && user.uid;
     if (typed) {
-      return { name: typed, handle: handleFromName(typed), minted: false, emailPrefixShowing: false };
+      return { name: typed, handle: handleFromName(typed, uid), minted: false, emailPrefixShowing: false };
     }
     var display = usableDisplayName(user);
     if (display) {
       return {
         name: display,
-        handle: handleFromName(display),
+        handle: handleFromName(display, uid),
         minted: false,
         emailPrefixShowing: emailPrefixShowing(user)
       };
     }
-    var fan = fanNameStored(user && user.uid);
-    return { name: fan, handle: handleFromName(fan), minted: true, emailPrefixShowing: false };
+    var fan = fanNameStored(uid);
+    return { name: fan, handle: handleFromName(fan, uid), minted: true, emailPrefixShowing: false };
   }
   function authorForWrite(live) {
     if (currentUser && currentUser.live && currentUser.name && live && currentUser.uid === live.uid) {
-      return { name: currentUser.name, handle: currentUser.handle || handleFromName(currentUser.name) };
+      return { name: currentUser.name, handle: currentUser.handle || handleFromName(currentUser.name, live.uid) };
     }
     return memberIdentity(live);
   }
@@ -453,7 +534,9 @@
       chain = user.updateProfile({ displayName: idn.name });
     }
     return chain.then(function () {
-      return fbDb.collection('users').doc(user.uid).set(data, { merge: true });
+      return fbDb.collection('users').doc(user.uid).set(data, { merge: true }).then(function () {
+        return claimHandle(user.uid, idn.name, idn.handle);
+      });
     });
   }
   function persistMintedName(user, name) {
@@ -519,12 +602,13 @@
     var user = fbAuth && fbAuth.currentUser;
     if (!user) { if (err) err.textContent = 'Sign in first.'; return; }
     if (!nameOk(name)) { if (err) err.textContent = 'That display name is reserved.'; return; }
-    var handle = handleFromName(name);
-    if (!handleOk(handle)) { if (err) err.textContent = 'That handle is reserved.'; return; }
-    ensurePublicProfile(user, name).then(function () {
+    var handle = handleFromName(name, user.uid);
+    if (!handleOk(handle, user.uid)) { if (err) err.textContent = 'That handle is reserved.'; return; }
+    ensurePublicProfile(user, name).then(function (settled) {
       if (currentUser) {
         currentUser.name = name;
-        currentUser.handle = handle;
+        currentUser.handle = settled || (currentUser.handle || handle);
+        rememberHandle(user.uid, currentUser.handle);
         saveJSON(LS_USER, currentUser);
       }
       renderSidebarAuth();
@@ -671,7 +755,7 @@
     if (linkCount(text) > 2) return 'Posts can include at most 2 links.';
     if (text && !spamFree(text)) return 'That text is blocked by the room spam filter.';
     if (!nameOk(doc.authorName || '')) return 'That display name is reserved.';
-    if (!handleOk(doc.authorHandle || '')) return 'That handle is reserved. Use letters, numbers, or underscores (max 15).';
+    if (!handleOk(doc.authorHandle || '', doc.authorUid)) return 'That handle is reserved. Use letters, numbers, or underscores (max 15).';
     return '';
   }
   function guardedPostWrite(doc) {
@@ -1032,9 +1116,11 @@
   }
   function humanHandle(d, uid) {
     var h = (d && d.authorHandle) || '';
-    if (h && h !== uid && !looksLikeUid(h)) return h;
-    var n = humanName(d, uid);
-    return String(n).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+    if (h && h !== uid && !looksLikeUid(h)) {
+      rememberHandle(uid, h);
+      return h;
+    }
+    return shownHandle(uid, '', humanName(d, uid));
   }
   function liveUid() {
     return (fbAuth && fbAuth.currentUser && fbAuth.currentUser.uid) || null;
@@ -1688,15 +1774,25 @@
     var draft = peekCompose();
     var shouldLand = consumeAuthLand();
     var idn = memberIdentity(user);
+    var prior = (currentUser && currentUser.uid === user.uid && currentUser.handle) || '';
     currentUser = {
       uid: user.uid,
       name: idn.name,
-      handle: idn.handle,
+      handle: (prior && handleOk(prior, user.uid)) ? prior : idn.handle,
       bio: '',
       live: true
     };
     saveJSON(LS_USER, currentUser);
     if (idn.minted) persistMintedName(user, idn.name);
+    claimHandle(user.uid, idn.name, currentUser.handle).then(function (handle) {
+      if (!handle || !currentUser || currentUser.uid !== user.uid) return;
+      rememberHandle(user.uid, handle);
+      if (currentUser.handle === handle) return;
+      currentUser.handle = handle;
+      saveJSON(LS_USER, currentUser);
+      renderSidebarAuth();
+      syncProfile();
+    }).catch(function (e) { console.warn('handle', e); });
     closeAuth();
     renderSidebarAuth();
     hideDummyChrome();
@@ -4319,8 +4415,10 @@
     var me = liveUid();
     el.innerHTML = list.map(function (c) {
       var name = convPeerName(c);
+      var peer = convPeerUid(c);
       var unread = (c.unreadCounts && me && c.unreadCounts[me]) || 0;
-      var handle = String(name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+      hydrateHandle(peer);
+      var handle = shownHandle(peer, '', name);
       return '<div class="chat-thread-item' + (c.id === activeConvId ? ' active' : '') + '" data-cid="' + escapeHtml(c.id) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(name) + '</div><div><div class="thread-name">' + escapeHtml(name) +
           (unread ? '<span class="thread-unread">' + escapeHtml(String(unread)) + '</span>' : '') +
         '</div><div class="thread-preview">' + escapeHtml(c.lastMessage || '') + '</div></div></div>';
@@ -4536,7 +4634,8 @@
         if (doc.id === me) return;
         var d = doc.data() || {};
         var name = dmDisplayName(d.displayName);
-        rows.push({ uid: doc.id, name: name });
+        rememberHandle(doc.id, d.handle);
+        rows.push({ uid: doc.id, name: name, handle: d.handle || '' });
       });
       rows.sort(function (a, b) { return a.name.localeCompare(b.name); });
       if (!list) return;
@@ -4545,7 +4644,7 @@
         return;
       }
       list.innerHTML = rows.map(function (u) {
-        var handle = String(u.name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+        var handle = shownHandle(u.uid, u.handle, u.name);
         return '<div class="chat-picker-item" data-pick-uid="' + escapeHtml(u.uid) + '" data-pick-name="' + escapeHtml(u.name) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(u.name) + '</div><div class="thread-name">' + escapeHtml(u.name) + '</div></div>';
       }).join('');
     }).catch(function (e) {
@@ -4596,12 +4695,13 @@
     viewingProfile = {
       uid: uid,
       name: dmDisplayName(name),
-      handle: String(handle || name || 'member').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member'
+      handle: shownHandle(uid, handle, name)
     };
     closeSocialOverlays();
     document.getElementById('profile-overlay').classList.add('active');
     highlightSocial('profile');
     syncProfile();
+    hydrateHandle(uid);
   }
 
   function paintProfile(name, handle, bio, uid) {
