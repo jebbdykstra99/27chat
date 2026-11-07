@@ -364,11 +364,11 @@
     if (/аdmin|аdministrator|οfficial|оfficial/i.test(s)) return false;
     return true;
   }
-  function handleOk(h) {
+  function handleOk(h, uid) {
     return typeof h === 'string'
       && /^[a-z0-9_]{1,15}$/.test(h)
       && !HANDLE_EXACT[h]
-      && !/^(admin|moderator|official|subx|jebb)/.test(h)
+      && (uid === ADMIN_UID || !/^(admin|moderator|official|subx|jebb)/.test(h))
       && !/(adm1n|4dmin|0fficial|st3ward)/.test(h);
   }
   function fourDigits() {
@@ -376,16 +376,96 @@
     while (s.length < 4) s = '0' + s;
     return s;
   }
-  function handleFromName(name) {
+  function handleFromName(name, uid) {
     var h = String(name || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 15);
     if (!h) h = 'fan';
-    if (handleOk(h)) return h;
+    if (handleOk(h, uid)) return h;
     var digits = fourDigits();
     var withDigits = (h + digits).slice(0, 15);
-    if (handleOk(withDigits)) return withDigits;
+    if (handleOk(withDigits, uid)) return withDigits;
     var prefixed = ('f' + digits + h).replace(/[^a-z0-9_]/g, '').slice(0, 15);
-    if (handleOk(prefixed)) return prefixed;
+    if (handleOk(prefixed, uid)) return prefixed;
     return ('fan' + digits).slice(0, 15);
+  }
+  var knownHandles = {};
+  var handleFetches = {};
+  function realHandle(h) {
+    return (typeof h === 'string' && /^[a-z0-9_]{1,15}$/.test(h)) ? h : '';
+  }
+  function shownHandle(uid, stored) {
+    return (uid && knownHandles[uid]) || realHandle(stored) || '';
+  }
+  function paintAt(el, h, pending) {
+    if (!el) return;
+    el.textContent = h ? ('@' + h) : (pending ? '' : 'handle unavailable');
+    el.classList.toggle('handle-unavailable', !h && !pending);
+  }
+  function settleView(uid) {
+    if (viewingProfile && viewingProfile.uid === uid) {
+      viewingProfile.handle = shownHandle(uid, viewingProfile.handle);
+      syncProfile();
+    }
+    renderThreads();
+  }
+  function hydrateHandle(uid) {
+    if (!fbDb || !uid || handleFetches[uid]) return;
+    handleFetches[uid] = 1;
+    fbDb.collection('users').doc(uid).get().then(function (snap) {
+      var h = realHandle(snap.exists && (snap.data() || {}).handle);
+      if (!h) { settleView(uid); return null; }
+      return fbDb.collection('handles').doc(h).get().then(function (c) {
+        if (c.exists && String((c.data() || {}).uid || '') === uid) knownHandles[uid] = h;
+        settleView(uid);
+      });
+    }).catch(function () { settleView(uid); });
+  }
+  function claimCandidate(name, uid, n) {
+    var h = handleFromName(n ? 'f' + n + fourDigits() + String(name || 'fan') : name, '');
+    return (h === 'j32b' || h === 'takedown') ? handleFromName('fan' + fourDigits(), '') : h;
+  }
+  function claimHandle(uid, name) {
+    if (!fbDb || !uid || typeof fbDb.runTransaction !== 'function') return Promise.resolve('');
+    if (!accountsOpen() && uid !== ADMIN_UID) return Promise.resolve('');
+    var userRef = fbDb.collection('users').doc(uid), tries = 0;
+    function attempt() {
+      var candidate = claimCandidate(name, uid, tries++);
+      return fbDb.runTransaction(function (tx) {
+        function save(handle, ref, snap) {
+          if (!snap.exists) {
+            var claim = { uid: uid };
+            if (SITE_ID) claim.siteId = SITE_ID;
+            tx.set(ref, claim);
+          }
+          var patch = { handle: handle };
+          if (SITE_ID) patch.siteId = SITE_ID;
+          tx.set(userRef, patch, { merge: true });
+          return handle;
+        }
+        return tx.get(userRef).then(function (userSnap) {
+          var existing = realHandle(userSnap.exists && (userSnap.data() || {}).handle);
+          if (existing && !handleOk(existing, uid)) existing = '';
+          function mint() {
+            var ref = fbDb.collection('handles').doc(candidate);
+            return tx.get(ref).then(function (snap) {
+              var owner = snap.exists ? String((snap.data() || {}).uid || '') : '';
+              if (owner && owner !== uid) { var err = new Error('handle taken'); err.code = 'handle-taken'; throw err; }
+              return save(candidate, ref, snap);
+            });
+          }
+          if (!existing) return mint();
+          return tx.get(fbDb.collection('handles').doc(existing)).then(function (snap) {
+            var owner = snap.exists ? String((snap.data() || {}).uid || '') : '';
+            if (owner === uid) return save(existing, fbDb.collection('handles').doc(existing), snap);
+            return mint();
+          });
+        });
+      }).catch(function (e) {
+        if (e && e.code === 'handle-taken' && tries < 6) return attempt();
+        if (isPermDenied(e) || (e && e.code === 'handle-taken')) return '';
+        return Promise.reject(e);
+      });
+    }
+    return attempt();
   }
   function fanNameStored(uid) {
     var key = 'subx.fanName.v1.' + String(uid || 'anon');
@@ -414,26 +494,17 @@
   }
   function memberIdentity(user, typedName) {
     var typed = String(typedName || '').trim();
-    if (typed) {
-      return { name: typed, handle: handleFromName(typed), minted: false, emailPrefixShowing: false };
-    }
+    var uid = user && user.uid;
+    if (typed) return { name: typed, minted: false, emailPrefixShowing: false };
     var display = usableDisplayName(user);
-    if (display) {
-      return {
-        name: display,
-        handle: handleFromName(display),
-        minted: false,
-        emailPrefixShowing: emailPrefixShowing(user)
-      };
-    }
-    var fan = fanNameStored(user && user.uid);
-    return { name: fan, handle: handleFromName(fan), minted: true, emailPrefixShowing: false };
+    if (display) return { name: display, minted: false, emailPrefixShowing: emailPrefixShowing(user) };
+    return { name: fanNameStored(uid), minted: true, emailPrefixShowing: false };
   }
   function authorForWrite(live) {
     if (currentUser && currentUser.live && currentUser.name && live && currentUser.uid === live.uid) {
-      return { name: currentUser.name, handle: currentUser.handle || handleFromName(currentUser.name) };
+      return { name: currentUser.name, handle: currentUser.handle || '' };
     }
-    return memberIdentity(live);
+    return { name: memberIdentity(live).name, handle: '' };
   }
   function ensurePublicProfile(user, typedName, extra) {
     if (!fbDb || !user) return Promise.resolve();
@@ -453,7 +524,9 @@
       chain = user.updateProfile({ displayName: idn.name });
     }
     return chain.then(function () {
-      return fbDb.collection('users').doc(user.uid).set(data, { merge: true });
+      return fbDb.collection('users').doc(user.uid).set(data, { merge: true }).then(function () {
+        return claimHandle(user.uid, idn.name);
+      });
     });
   }
   function persistMintedName(user, name) {
@@ -519,12 +592,12 @@
     var user = fbAuth && fbAuth.currentUser;
     if (!user) { if (err) err.textContent = 'Sign in first.'; return; }
     if (!nameOk(name)) { if (err) err.textContent = 'That display name is reserved.'; return; }
-    var handle = handleFromName(name);
-    if (!handleOk(handle)) { if (err) err.textContent = 'That handle is reserved.'; return; }
-    ensurePublicProfile(user, name).then(function () {
+    ensurePublicProfile(user, name).then(function (settled) {
       if (currentUser) {
         currentUser.name = name;
-        currentUser.handle = handle;
+        currentUser.handleReady = true;
+        currentUser.handle = settled || '';
+        if (settled) knownHandles[user.uid] = settled;
         saveJSON(LS_USER, currentUser);
       }
       renderSidebarAuth();
@@ -671,7 +744,7 @@
     if (linkCount(text) > 2) return 'Posts can include at most 2 links.';
     if (text && !spamFree(text)) return 'That text is blocked by the room spam filter.';
     if (!nameOk(doc.authorName || '')) return 'That display name is reserved.';
-    if (!handleOk(doc.authorHandle || '')) return 'That handle is reserved. Use letters, numbers, or underscores (max 15).';
+    if (!handleOk(doc.authorHandle || '', doc.authorUid)) return 'That handle is reserved. Use letters, numbers, or underscores (max 15).';
     return '';
   }
   function guardedPostWrite(doc) {
@@ -1004,6 +1077,7 @@
   }
 
   let currentUser = loadJSON(LS_USER, null);
+  if (currentUser && currentUser.live) { currentUser.handle = ''; currentUser.handleReady = false; }
   let currentTab = 'foryou';
 
   function initials(name) {
@@ -1031,10 +1105,12 @@
     return 'Member';
   }
   function humanHandle(d, uid) {
-    var h = (d && d.authorHandle) || '';
-    if (h && h !== uid && !looksLikeUid(h)) return h;
-    var n = humanName(d, uid);
-    return String(n).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+    var h = realHandle((d && d.authorHandle) || '');
+    if (h && h !== uid && !looksLikeUid(h)) {
+      if (!knownHandles[uid]) knownHandles[uid] = h;
+      return h;
+    }
+    return (uid && knownHandles[uid]) || '';
   }
   function liveUid() {
     return (fbAuth && fbAuth.currentUser && fbAuth.currentUser.uid) || null;
@@ -1220,13 +1296,6 @@
   function ensureShareSheet() {
    var ov = document.getElementById('share-sheet');
    if (ov) return ov;
-   if (!document.getElementById('share-sheet-css')) {
-     var st = document.createElement('style');
-     st.id = 'share-sheet-css';
-     st.textContent =
-       '#share-sheet{position:fixed;inset:0;z-index:80;background:rgba(18,24,28,.42);display:flex;align-items:flex-end;justify-content:center;padding:16px;}#share-sheet[hidden]{display:none!important;}.share-sheet{width:min(420px,100%);background:var(--surface,#fffaf3);color:var(--text,#1a2a30);border:1px solid var(--border,#e4d6c4);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.18);padding:10px;}.share-sheet h3{margin:6px 8px 10px;font-size:15px;font-weight:650;}.share-sheet button{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:10px;padding:11px 12px;font:inherit;font-size:14px;cursor:pointer;color:inherit;}.share-sheet button:hover{background:rgba(0,0,0,.06);}.share-sheet .share-cancel{color:var(--text-muted,#4a5f66);margin-top:4px;}.share-sheet-preview{display:block;width:100%;max-height:160px;object-fit:cover;border-radius:10px;margin:0 0 8px;}.share-sheet-preview[hidden]{display:none!important;}.post.is-deep-post{box-shadow:inset 0 0 0 2px var(--accent,#e07a3d);border-radius:10px;}';
-     document.head.appendChild(st);
-   }
    ov = document.createElement('div');
    ov.id = 'share-sheet';
    ov.hidden = true;
@@ -1643,15 +1712,6 @@
     if (el) el.hidden = true;
   }
 
-  function ensureEarlyWelcomeCss() {
-    if (document.getElementById('early-welcome-css')) return;
-    var st = document.createElement('style');
-    st.id = 'early-welcome-css';
-    st.textContent =
-      '.early-welcome[hidden]{display:none!important;}.early-welcome{margin:0.7rem 1rem 0.15rem;padding:0.85rem 0.95rem 0.85rem 1.05rem;background:var(--surface,#111);color:var(--text,#f4f4f4);border:1px solid var(--border,rgba(255,255,255,0.12));border-radius:10px;font-size:0.86rem;line-height:1.45;display:flex;gap:0.75rem;align-items:flex-start;}.early-welcome-copy{flex:1;}.early-welcome-dismiss{flex:0 0 auto;width:1.7rem;height:1.7rem;padding:0;border:1px solid var(--border,rgba(255,255,255,0.18));background:transparent;color:var(--text-muted,#9a9aa3);border-radius:8px;cursor:pointer;font-size:1.1rem;line-height:1;}.early-welcome-dismiss:hover{color:var(--text,#f4f4f4);background:rgba(255,255,255,0.06);}';
-    document.head.appendChild(st);
-  }
-
   function syncEarlyWelcome() {
     var uid = liveUid();
     var user = fbAuth && fbAuth.currentUser;
@@ -1661,7 +1721,6 @@
       if (el) el.hidden = true;
       return;
     }
-    ensureEarlyWelcomeCss();
     if (!el) {
       el = document.createElement('div');
       el.id = 'early-welcome';
@@ -1691,12 +1750,31 @@
     currentUser = {
       uid: user.uid,
       name: idn.name,
-      handle: idn.handle,
+      handle: '',
+      handleReady: false,
       bio: '',
       live: true
     };
     saveJSON(LS_USER, currentUser);
     if (idn.minted) persistMintedName(user, idn.name);
+    claimHandle(user.uid, idn.name).then(function (handle) {
+      if (!currentUser || currentUser.uid !== user.uid) return;
+      currentUser.handleReady = true;
+      currentUser.handle = handle || '';
+      if (handle) knownHandles[user.uid] = handle;
+      saveJSON(LS_USER, currentUser);
+      renderSidebarAuth();
+      syncProfile();
+      syncPostBtn();
+    }).catch(function (e) {
+      console.warn('handle', e);
+      if (!currentUser || currentUser.uid !== user.uid) return;
+      currentUser.handleReady = true;
+      currentUser.handle = '';
+      saveJSON(LS_USER, currentUser);
+      renderSidebarAuth();
+      syncProfile();
+    });
     closeAuth();
     renderSidebarAuth();
     hideDummyChrome();
@@ -2807,7 +2885,7 @@
                 : '') +
             '>' + escapeHtml(post.name) + '</span>' +
             stewardPillHtml(post) +
-            '<span class="post-handle">@' + escapeHtml(post.handle) + '</span><span class="post-time">· ' + (post.hours != null ? post.hours + 'h' : 'now') + '</span></div>' +
+            '<span class="post-handle' + (post.handle ? '' : ' handle-unavailable') + '">' + escapeHtml(post.handle ? ('@' + post.handle) : 'handle unavailable') + '</span><span class="post-time">· ' + (post.hours != null ? post.hours + 'h' : 'now') + '</span></div>' +
           (post.text ? '<p class="post-text">' + escapeHtml(post.text) + '</p>' : '') +
           renderPostMedia(post) +
           '<div class="post-actions">' +
@@ -3716,6 +3794,7 @@
     var live = fbAuth && fbAuth.currentUser;
     if (!live) return Promise.reject(new Error('Sign in to post. Guest can only browse.'));
     var who = authorForWrite(live);
+    if (!who.handle) return Promise.reject(new Error('Handle unavailable.'));
     return guardedPostWrite({
       siteId: SITE_ID,
       parentId: null,
@@ -4319,8 +4398,10 @@
     var me = liveUid();
     el.innerHTML = list.map(function (c) {
       var name = convPeerName(c);
+      var peer = convPeerUid(c);
       var unread = (c.unreadCounts && me && c.unreadCounts[me]) || 0;
-      var handle = String(name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+      hydrateHandle(peer);
+      var handle = shownHandle(peer, '') || name;
       return '<div class="chat-thread-item' + (c.id === activeConvId ? ' active' : '') + '" data-cid="' + escapeHtml(c.id) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(name) + '</div><div><div class="thread-name">' + escapeHtml(name) +
           (unread ? '<span class="thread-unread">' + escapeHtml(String(unread)) + '</span>' : '') +
         '</div><div class="thread-preview">' + escapeHtml(c.lastMessage || '') + '</div></div></div>';
@@ -4536,7 +4617,7 @@
         if (doc.id === me) return;
         var d = doc.data() || {};
         var name = dmDisplayName(d.displayName);
-        rows.push({ uid: doc.id, name: name });
+        rows.push({ uid: doc.id, name: name, handle: d.handle || '' });
       });
       rows.sort(function (a, b) { return a.name.localeCompare(b.name); });
       if (!list) return;
@@ -4545,7 +4626,7 @@
         return;
       }
       list.innerHTML = rows.map(function (u) {
-        var handle = String(u.name).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member';
+        var handle = shownHandle(u.uid, u.handle) || u.name;
         return '<div class="chat-picker-item" data-pick-uid="' + escapeHtml(u.uid) + '" data-pick-name="' + escapeHtml(u.name) + '"><div class="post-avatar" style="background:' + colorFor(handle) + '">' + initials(u.name) + '</div><div class="thread-name">' + escapeHtml(u.name) + '</div></div>';
       }).join('');
     }).catch(function (e) {
@@ -4596,12 +4677,13 @@
     viewingProfile = {
       uid: uid,
       name: dmDisplayName(name),
-      handle: String(handle || name || 'member').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'member'
+      handle: shownHandle(uid, handle)
     };
     closeSocialOverlays();
     document.getElementById('profile-overlay').classList.add('active');
     highlightSocial('profile');
     syncProfile();
+    hydrateHandle(uid);
   }
 
   function paintProfile(name, handle, bio, uid) {
@@ -4609,8 +4691,7 @@
     if (top) top.textContent = name;
     var dn = document.getElementById('profile-display-name');
     if (dn) dn.textContent = name;
-    var h = document.getElementById('profile-handle');
-    if (h) h.textContent = '@' + handle;
+    paintAt(document.getElementById('profile-handle'), handle, false);
     var av = document.getElementById('profile-avatar');
     if (av) av.textContent = initials(name);
     var b = document.getElementById('profile-bio');
@@ -4640,7 +4721,7 @@
         msgBtn.hidden = !dmsOn();
         msgBtn.disabled = false;
       }
-      paintProfile(viewingProfile.name || 'Member', viewingProfile.handle || 'member', '', viewingProfile.uid);
+      paintProfile(viewingProfile.name || 'Member', viewingProfile.handle || '', '', viewingProfile.uid);
       syncFollowButton();
       return;
     }
@@ -4664,6 +4745,7 @@
       currentUser.bio || skin('bioDefault', ''),
       currentUser.uid
     );
+    paintAt(document.getElementById('profile-handle'), currentUser.handle, !currentUser.handleReady);
     syncFollowButton();
   }
 
@@ -4672,8 +4754,10 @@
     const av = document.getElementById('thoughts-compose-avatar');
     if (!el) return;
     if (isLiveUser() && currentUser && currentUser.live) {
+      var pending = !currentUser.handleReady;
+      var label = currentUser.handle ? ('@' + currentUser.handle) : (pending ? currentUser.name : 'handle unavailable');
       el.innerHTML =
-        '<div class="sidebar-auth-user"><div class="sidebar-auth-avatar">' + initials(currentUser.name) + '</div><div class="sidebar-auth-name">@' + escapeHtml(currentUser.handle) + '</div></div><button class="sidebar-auth-btn" id="auth-signout" type="button">Sign out</button>';
+        '<div class="sidebar-auth-user"><div class="sidebar-auth-avatar">' + initials(currentUser.name) + '</div><div class="sidebar-auth-name' + ((!currentUser.handle && !pending) ? ' handle-unavailable' : '') + '">' + escapeHtml(label) + '</div></div><button class="sidebar-auth-btn" id="auth-signout" type="button">Sign out</button>';
       if (av) {
         av.textContent = initials(currentUser.name);
         av.style.background = colorFor(currentUser.handle);
@@ -5085,6 +5169,7 @@
    const live = fbAuth && fbAuth.currentUser;
    if (!live) { composeErr('Sign in to post. Guest can only browse.'); openAuth('join'); return; }
    if (!requireVerified('post')) return;
+   if (!currentUser || !currentUser.handle) { composeErr('Handle unavailable.'); return; }
    if (!fbDb) { composeErr('Feed is not connected.'); return; }
    const parentId = replyTo;
    replyTo = null;
@@ -6298,6 +6383,7 @@
    }
    var live = fbAuth && fbAuth.currentUser;
    if (!live) return;
+   if (!currentUser || !currentUser.handle) { storiesErr('Handle unavailable.'); return; }
    var textEl = document.getElementById('stories-composer-text');
    var capEl = document.getElementById('stories-composer-caption');
    var body = ((textEl && textEl.value) || '').trim().slice(0, STORIES_TEXT_MAX);
@@ -6412,7 +6498,7 @@
      : '';
    var canReport = isLiveUser() && story.authorUid && story.authorUid !== liveUid();
    el.innerHTML =
-     '<div class="stories-viewer-card"><div class="stories-progress">' + segs + '</div><div class="stories-viewer-top"><div class="stories-avatar" style="width:32px;height:32px;font-size:0.65rem;background:' + colorFor(story.handle) + '">' + escapeHtml(initials(story.name)) + '</div><div><div class="stories-viewer-who">' + escapeHtml(story.name) + '</div><div class="stories-viewer-meta">@' + escapeHtml(story.handle) + ' · ' + when + '</div></div><button type="button" class="stories-viewer-close" data-story-ui="close" aria-label="Close">&times;</button></div><div class="stories-stage">' +
+     '<div class="stories-viewer-card"><div class="stories-progress">' + segs + '</div><div class="stories-viewer-top"><div class="stories-avatar" style="width:32px;height:32px;font-size:0.65rem;background:' + colorFor(story.handle) + '">' + escapeHtml(initials(story.name)) + '</div><div><div class="stories-viewer-who">' + escapeHtml(story.name) + '</div><div class="stories-viewer-meta' + (story.handle ? '' : ' handle-unavailable') + '">' + escapeHtml(story.handle ? ('@' + story.handle) : 'handle unavailable') + ' · ' + when + '</div></div><button type="button" class="stories-viewer-close" data-story-ui="close" aria-label="Close">&times;</button></div><div class="stories-stage">' +
          media + caption +
          '<button type="button" class="stories-stage-hit prev" data-story-ui="prev" aria-label="Previous"></button><button type="button" class="stories-stage-hit next" data-story-ui="next" aria-label="Next"></button></div><div class="stories-viewer-actions">' +
          (canReport ? '<button type="button" data-story-ui="report">Report</button>' : '') +
