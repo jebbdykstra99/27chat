@@ -38,6 +38,9 @@ function installStub(page) {
             lastMessage: 'still playing',
             unreadCounts: { 'stored-user': 0, 'peer-1': 0 }
           };
+        } else if (as === 'stolen') {
+          store['users/fan-user'] = { siteId: '27chat', displayName: 'Jebb Dykstra', handle: 'keptfan' };
+          store['handles/keptfan'] = { uid: 'other-uid', siteId: '27chat' };
         } else if (as === 'admin') {
           store['users/' + 'o774wL9hUVSi19EkDCgLqQomP8i2'] = { siteId: '27chat', displayName: 'Jebb Dykstra', handle: 'j32b' };
           store['handles/j32b'] = { uid: 'o774wL9hUVSi19EkDCgLqQomP8i2', siteId: '27chat' };
@@ -68,7 +71,17 @@ function installStub(page) {
           return {
             id: pathParts[pathParts.length - 1],
             get: function () {
+              if (params.get('peer') === 'deny' && key === 'users/peer-1') {
+                return Promise.reject({ code: 'permission-denied', message: 'denied' });
+              }
               var data = store[key];
+              if (!data && params.get('claim') === 'taken' && key.indexOf('handles/') === 0) {
+                return Promise.resolve({
+                  exists: true,
+                  id: pathParts[pathParts.length - 1],
+                  data: function () { return { uid: 'other-uid' }; }
+                });
+              }
               return Promise.resolve({
                 exists: !!data,
                 id: pathParts[pathParts.length - 1],
@@ -171,9 +184,23 @@ function installStub(page) {
         }
         var txChain = Promise.resolve();
         function firestoreFn() {
-          return { collection: collection, runTransaction: firestoreFn.runTransaction };
+          return {
+            collection: collection,
+            runTransaction: firestoreFn.runTransaction,
+            batch: function () {
+              var ops = [];
+              return {
+                set: function (ref, data, opts) { ops.push(function () { return ref.set(data, opts); }); },
+                update: function (ref, data) { ops.push(function () { return ref.update(data); }); },
+                commit: function () {
+                  ops.forEach(function (op) { op(); });
+                  return Promise.resolve();
+                }
+              };
+            }
+          };
         }
-        firestoreFn.runTransaction = function (fn) {
+        function runClaim(fn) {
           var run = txChain.then(function () {
             var tx = {
               get: function (ref) { return ref.get(); },
@@ -183,6 +210,17 @@ function installStub(page) {
           });
           txChain = run.then(function () {}, function () {});
           return run;
+        }
+        firestoreFn.runTransaction = function (fn) {
+          if (params.get('claim') === 'deny') {
+            return Promise.reject({ code: 'permission-denied', message: 'Missing or insufficient permissions.' });
+          }
+          if (params.get('claim') === 'delay') {
+            return new Promise(function (resolve, reject) {
+              window.__releaseClaim = function () { runClaim(fn).then(resolve, reject); };
+            });
+          }
+          return runClaim(fn);
         };
         firestoreFn.FieldValue = {
           serverTimestamp: function () { return { __ts: 1 }; },
@@ -407,4 +445,121 @@ test('the admin keeps j32b', async ({ page }) => {
   expect(doc.user.handle).toBe('j32b');
   expect(doc.claim).toEqual({ uid: ADMIN_UID, siteId: '27chat' });
   expect(doc.keys).toEqual(['handles/j32b', 'handles/keptfan']);
+});
+
+async function expectUnavailable(page) {
+  await expect(page.locator('#sidebar-auth .sidebar-auth-name')).toHaveText('handle unavailable');
+  await expect(page.locator('#sidebar-auth .sidebar-auth-name')).toHaveClass(/handle-unavailable/);
+  const text = await page.locator('#sidebar-auth .sidebar-auth-name').innerText();
+  expect(text.includes('@')).toBe(false);
+}
+
+test('a denied claim writes nothing and shows no @handle', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?as=fan&claim=deny');
+  await waitBoot(page);
+  await emailSignIn(page);
+  await expectUnavailable(page);
+  const store = await page.evaluate(function () {
+    return {
+      handles: Object.keys(window.__store).filter(function (k) { return k.indexOf('handles/') === 0; }),
+      user: window.__store['users/fan-user'] || null
+    };
+  });
+  expect(store.handles).toEqual([]);
+  expect(!store.user || !store.user.handle).toBe(true);
+});
+
+test('a taken handle is not reused, and a fully blocked claim shows no @handle', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?as=fan&claim=taken');
+  await waitBoot(page);
+  await emailSignIn(page);
+  await expectUnavailable(page);
+  const store = await page.evaluate(function () {
+    return {
+      handles: Object.keys(window.__store).filter(function (k) { return k.indexOf('handles/') === 0; }),
+      user: window.__store['users/fan-user'] || null
+    };
+  });
+  expect(store.handles).toEqual([]);
+  expect(!store.user || store.user.handle !== 'f0000jebbdykstr').toBe(true);
+  expect(!store.user || !store.user.handle).toBe(true);
+});
+
+test('a stored handle owned by someone else is not shown', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?as=stolen');
+  await waitBoot(page);
+  await emailSignIn(page);
+  const handle = await settledHandle(page);
+  expect(handle).not.toBe('keptfan');
+  expect(handle).toMatch(/^[a-z0-9_]{1,15}$/);
+  const store = await page.evaluate(function (next) {
+    return {
+      user: window.__store['users/fan-user'],
+      oldClaim: window.__store['handles/keptfan'],
+      claim: window.__store['handles/' + next]
+    };
+  }, handle);
+  expect(store.user.handle).toBe(handle);
+  expect(store.oldClaim).toEqual({ uid: 'other-uid', siteId: '27chat' });
+  expect(store.claim.uid).toBe('fan-user');
+  await expect(page.locator('#sidebar-auth .sidebar-auth-name')).not.toHaveText('@keptfan');
+});
+
+test('a missing handle and a denied profile read show the name without an @handle', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?as=fan&peer=missing');
+  await waitBoot(page);
+  await emailSignIn(page);
+  await expect(page.locator('.post-handle').first()).toHaveText('handle unavailable');
+  await expect(page.locator('.post-name').first()).toHaveText('Listener');
+  await page.waitForSelector('[data-profile-uid="peer-1"]');
+  await page.locator('[data-profile-uid="peer-1"]').click();
+  await expect(page.locator('#profile-display-name')).toHaveText('Listener');
+  await expect(page.locator('#profile-handle')).toHaveText('handle unavailable');
+  await expect(page.locator('#profile-handle')).toHaveClass(/handle-unavailable/);
+  expect(await page.locator('#profile-handle').innerText()).not.toMatch(/@/);
+
+  await page.goto('/?as=fan&peer=deny');
+  await waitBoot(page);
+  await emailSignIn(page);
+  await page.waitForSelector('[data-profile-uid="peer-1"]');
+  await page.locator('[data-profile-uid="peer-1"]').click();
+  await expect(page.locator('#profile-display-name')).toHaveText('Listener');
+  await expect(page.locator('#profile-handle')).toHaveText('handle unavailable');
+  expect(await page.locator('#profile-handle').innerText()).not.toMatch(/@/);
+});
+
+test('posts and likes wait for a claimed handle and do not send a guessed authorHandle', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?as=fan&claim=delay');
+  await waitBoot(page);
+  await emailSignIn(page);
+  await expect(page.locator('#sidebar-auth .sidebar-auth-name')).not.toHaveText(/@/);
+  await page.locator('#thoughts-compose-input').fill('The guitar still answers.');
+  await page.locator('#thoughts-post-btn').click();
+  await expect(page.locator('#thoughts-compose-err')).toHaveText('Handle unavailable.');
+  await page.locator('[data-act="like"]').first().click();
+  const mid = await page.evaluate(function () {
+    return Object.keys(window.__store).filter(function (k) { return k.indexOf('posts/') === 0; }).map(function (k) {
+      return window.__store[k].authorHandle || '';
+    });
+  });
+  expect(mid.every(function (h) { return !h; })).toBe(true);
+  await page.evaluate(function () { window.__releaseClaim(); });
+  const handle = await settledHandle(page);
+  expect(handle).toMatch(/^f\d{4}jebbdykstr$/);
+  await page.locator('#thoughts-post-btn').click();
+  await expect(page.locator('#thoughts-compose-err')).not.toHaveText('Handle unavailable.');
+  const posted = await page.waitForFunction(function (h) {
+    var keys = Object.keys(window.__store).filter(function (k) { return k.indexOf('posts/') === 0; });
+    for (var i = 0; i < keys.length; i++) {
+      var doc = window.__store[keys[i]];
+      if (doc && doc.authorHandle) return doc.authorHandle === h ? doc.authorHandle : 'wrong:' + doc.authorHandle;
+    }
+    return null;
+  }, handle);
+  expect(await posted.jsonValue()).toBe(handle);
 });

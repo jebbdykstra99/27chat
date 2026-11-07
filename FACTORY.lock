@@ -4,12 +4,12 @@
   "room": "27chat",
   "siteId": "27chat",
   "files": {
-    "factory.js": "a48db760b58c772471cbe04e0268560cff599830c55103b8140c76ff5ebb4927",
-    "styles.css": "c4f16056699ba4450c1633caeb032b8f5680d92229c56b4c595cca0e82a70342"
+    "factory.js": "5e81e7c99b7979e4d96ca4aca36c5ee033a02a40be50fad421af609b2f668e35",
+    "styles.css": "9fadf2403b332654bac7bcadf8d3981a37cdcc10ed009705cd24aab0ea0d6214"
   },
   "keepFiles": [
     "takedown.js"
   ],
   "exceptions": "see subx-factory EXCEPTIONS.md",
-  "stampedAt": "2026-11-07T20:18:26Z"
+  "stampedAt": "2026-11-07T20:34:18Z"
 }
