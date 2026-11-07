@@ -5,7 +5,8 @@ import { fileURLToPath } from 'url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const artifacts = '/opt/cursor/artifacts';
-const POPUP_MSG = 'Google popup was blocked. Allow popups for this site, or use email.';
+const POPUP_MSG = 'Google popup sign-in could not open. Trying another sign-in method.';
+const RETURN_MSG = 'Google sign-in did not complete. Try again or use email.';
 
 function installStub(page) {
   return Promise.all([
@@ -382,7 +383,7 @@ test('popup-blocked falls back to redirect once and does not redirect again on r
   await page.reload();
   await waitBoot(page);
   await expect(page.locator('#cv-auth-overlay')).toHaveClass(/open/);
-  await expect(page.locator('#cv-login-err')).toHaveText(POPUP_MSG);
+  await expect(page.locator('#cv-login-err')).toHaveText(RETURN_MSG);
   const second = await page.evaluate(function () { return window.__googleCalls.slice(); });
   expect(second).toEqual([]);
   if (testInfo.project.name === 'webkit-iphone') {
@@ -392,7 +393,7 @@ test('popup-blocked falls back to redirect once and does not redirect again on r
   await page.reload();
   await waitBoot(page);
   await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
-  await expect(page.locator('#cv-login-err')).not.toHaveText(POPUP_MSG);
+  await expect(page.locator('#cv-login-err')).not.toHaveText(RETURN_MSG);
   const third = await page.evaluate(function () { return window.__googleCalls.slice(); });
   expect(third).toEqual([]);
 });
