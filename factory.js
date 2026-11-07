@@ -420,8 +420,8 @@
     }).catch(function () { settleView(uid); });
   }
   function claimCandidate(name, uid, n) {
-    if (!n) return handleFromName(name, uid);
-    return handleFromName('f' + n + fourDigits() + String(name || 'fan'), uid);
+    var h = handleFromName(n ? 'f' + n + fourDigits() + String(name || 'fan') : name, '');
+    return (h === 'j32b' || h === 'takedown') ? handleFromName('fan' + fourDigits(), '') : h;
   }
   function claimHandle(uid, name) {
     if (!fbDb || !uid || typeof fbDb.runTransaction !== 'function') return Promise.resolve('');
