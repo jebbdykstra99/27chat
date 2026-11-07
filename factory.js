@@ -137,6 +137,25 @@
 
   const FB_WEB_CONFIG_URL = 'https://subx-skins.web.app/firebase-web-config.json';
 
+  function chooseAuthPersistence(auth) {
+    var P = firebase.auth && firebase.auth.Auth && firebase.auth.Auth.Persistence;
+    var modes = P ? [P.LOCAL, P.SESSION, P.NONE] : [];
+    function step(i) {
+      if (!auth || !auth.setPersistence || i >= modes.length || !modes[i]) return Promise.resolve();
+      var result;
+      try { result = auth.setPersistence(modes[i]); }
+      catch (e) {
+        console.warn('auth persistence', e);
+        return step(i + 1);
+      }
+      return Promise.resolve(result).catch(function (e) {
+        console.warn('auth persistence', e);
+        return step(i + 1);
+      });
+    }
+    return step(0);
+  }
+
   function initFirebaseFromHostedConfig() {
     return fetch(FB_WEB_CONFIG_URL, { credentials: 'omit' })
       .then(function (res) {
@@ -156,10 +175,7 @@
           appId: cfg.appId
         });
         fbAuth = firebase.auth();
-        var persist = Promise.resolve();
-        try {
-          persist = fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL) || Promise.resolve();
-        } catch (ePersist) { console.warn('auth persistence', ePersist); }
+        var persist = chooseAuthPersistence(fbAuth);
         fbDb = firebase.firestore();
         fbStorage = firebase.storage();
         try {
@@ -329,6 +345,36 @@
   }
   function ageGateMessage() {
     return 'Confirm you are ' + siteMinAge() + ' or older and agree to the Terms and Privacy pages.';
+  }
+  var GOOGLE_REDIRECT_MSG = 'Google sign-in did not finish. Allow popups for this site and try again.';
+  function markGoogleRedirect() {
+    try { sessionStorage.setItem('subx.googleRedirect', '1'); } catch (e) {}
+  }
+  function consumeGoogleRedirect() {
+    try {
+      var on = sessionStorage.getItem('subx.googleRedirect') === '1';
+      if (on) sessionStorage.removeItem('subx.googleRedirect');
+      return on;
+    } catch (e) { return false; }
+  }
+  function showGoogleRedirectMiss() {
+    if (isLiveUser()) return;
+    var err = document.getElementById('cv-login-err');
+    if (err) {
+      err.textContent = GOOGLE_REDIRECT_MSG;
+      err.classList.add('show');
+    }
+    openAuth('join');
+  }
+  function rememberAuthAct(act) {
+    pendingAuthAct = act;
+  }
+  function replayAuthAct() {
+    var act = pendingAuthAct;
+    pendingAuthAct = null;
+    if (!act || !isLiveUser()) return;
+    if (act.kind === 'like') toggleLike(act.postId);
+    else if (act.kind === 'reply') beginReply(act.postId);
   }
   function paintAgeLabels() {
     var n = String(siteMinAge());
@@ -1047,6 +1093,7 @@
 
   var deepPostId = '';
   var authQ = '';
+  var pendingAuthAct = null;
   var deepPostDone = false;
   var shareSheetPostId = null;
 
@@ -1561,6 +1608,7 @@
     if (!user.emailVerified) {
       composeErr('Verify your email before posting. Check your inbox, then refresh.');
     }
+    replayAuthAct();
   }
 
   function mapLive(doc) {
@@ -4677,10 +4725,15 @@
     var draft = peekCompose();
     const ov = document.getElementById('cv-auth-overlay');
     if (!ov) return;
-    ov.classList.add('open');
     var mode = tab || 'join';
     if (mode === 'register' && !accountsOpen()) mode = 'join';
     if (mode === 'login') mode = 'join';
+    if (isLiveUser() && mode !== 'register') {
+      closeAuth();
+      replayAuthAct();
+      return;
+    }
+    ov.classList.add('open');
     var tabs = document.querySelector('#cv-auth-overlay .conv-modal-tabs');
     var login = document.getElementById('cv-panel-login');
     var reg = document.getElementById('cv-panel-register');
@@ -5013,6 +5066,7 @@
 
   function toggleLike(postId) {
     var uid = liveUid();
+    if (!isLiveUser()) rememberAuthAct({ kind: 'like', postId: postId });
     if (!requireVerified('like')) return;
     if (!uid) {
       composeErr('Sign in to like. Guest cannot like.');
@@ -5033,6 +5087,7 @@
       patch['likes.' + uid] = true;
     }
     fbDb.collection('posts').doc(postId).update(patch).then(function () {
+      composeErr('');
       if (!likedBy[uid] && post) sendNotif(post.authorUid, 'like', postId, '', 'like_' + postId + '_' + uid);
     }).catch(function (err) {
       composeErr((err && err.message) ? ('Like: ' + err.message) : 'Could not save like.');
@@ -5166,6 +5221,29 @@
      };
      setTimeout(function () { document.addEventListener('click', close); }, 20);
    });
+  }
+
+  function beginReply(postId) {
+    composeErr('');
+    var safe = String(postId || '').replace(/"/g, '');
+    var postEl = safe ? document.querySelector('[data-post-id="' + safe + '"]') : null;
+    var seedPost = findPost(postId);
+    if (isSessionSeedPost(seedPost)) {
+      replyTo = null;
+      var seedInput = document.getElementById('thoughts-compose-input');
+      if (seedInput) {
+        if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
+        seedInput.placeholder = 'Answer the room…';
+        seedInput.focus();
+      }
+      return;
+    }
+    replyTo = (postEl && postEl.dataset.parentId) || postId;
+    var input = document.getElementById('thoughts-compose-input');
+    if (!input) return;
+    if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
+    input.placeholder = 'Reply to this post…';
+    input.focus();
   }
 
   function wireEvents() {
@@ -5351,25 +5429,15 @@
        return;
      }
      if (e.target.closest('[data-act="reply"]')) {
-       if (!isLiveUser()) { composeErr('Sign in to reply. Guest can only browse.'); openAuth('join'); return; }
        const post = e.target.closest('[data-post-id]');
        if (!post) return;
-       var seedPost = findPost(post.dataset.postId);
-       if (isSessionSeedPost(seedPost)) {
-         replyTo = null;
-         const seedInput = document.getElementById('thoughts-compose-input');
-         if (seedInput) {
-           if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
-           seedInput.placeholder = 'Answer the room…';
-           seedInput.focus();
-         }
+       if (!isLiveUser()) {
+         rememberAuthAct({ kind: 'reply', postId: post.dataset.postId });
+         composeErr('Sign in to reply. Guest can only browse.');
+         openAuth('join');
          return;
        }
-       replyTo = post.dataset.parentId || post.dataset.postId;
-       const input = document.getElementById('thoughts-compose-input');
-       if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
-       input.placeholder = 'Reply to this post…';
-       input.focus();
+       beginReply(post.dataset.postId);
        return;
      }
      if (e.target.closest('[data-act="share"]')) {
@@ -5572,7 +5640,13 @@
    });
    document.getElementById('cv-google-login').addEventListener('click', function () {
      var err = document.getElementById('cv-login-err');
-     runWithAuth(err, function () {
+     if (!fbAuth) {
+       if (err) {
+         err.textContent = 'Auth is not ready.';
+         err.classList.add('show');
+       }
+       return;
+     }
      if (!accountsOpen() && !document.documentElement.classList.contains('acc-stew')) { err.textContent = ACC_CLOSED; err.classList.add('show'); return; }
      var age = document.getElementById('cv-google-age');
      if (!age || !age.checked) {
@@ -5584,9 +5658,6 @@
      err.classList.remove('show');
      markAuthLand();
      var provider = new firebase.auth.GoogleAuthProvider();
-     var ua = navigator.userAgent || '';
-     var isiOS = /iP(hone|od|ad)/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-     var isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|Android/i.test(ua);
      function finishGoogle(cred) {
        var u = cred && cred.user;
        if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut().then(function () { throw new Error(ACC_CLOSED); });
@@ -5601,7 +5672,7 @@
        var msg;
        if (e && e.code === 'auth/operation-not-allowed') {
          msg = 'Google is not enabled on subx-skins yet.';
-       } else if (e && e.code === 'auth/popup-closed-by-user') {
+       } else if (e && (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request')) {
          msg = 'Google sign-in cancelled.';
        } else {
          msg = (e && e.message) ? e.message : 'Google sign-in failed.';
@@ -5609,16 +5680,15 @@
        err.textContent = msg;
        err.classList.add('show');
      }
-     if (isiOS || isSafari) {
-       fbAuth.signInWithRedirect(provider).catch(failGoogle);
-     } else {
-       fbAuth.signInWithPopup(provider).then(finishGoogle).catch(function (e) {
-         if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request')) {
-           return fbAuth.signInWithRedirect(provider);
-         }
-         failGoogle(e);
-       });
-     }
+     // Popup must run in this turn. An await before it makes iOS Safari block the window.
+     fbAuth.signInWithPopup(provider).then(finishGoogle).catch(function (e) {
+       if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment')) {
+         err.textContent = GOOGLE_REDIRECT_MSG;
+         err.classList.add('show');
+         markGoogleRedirect();
+         return fbAuth.signInWithRedirect(provider).catch(failGoogle);
+       }
+       failGoogle(e);
      });
    });
    document.getElementById('cv-guest-login').addEventListener('click', function () { stubSignIn('Guest', skin('guestHandle', 'guest')); });
@@ -6519,8 +6589,10 @@
 
     fbReadyPromise.then(function () {
       if (fbAuth) {
-        fbAuth.getRedirectResult().then(function (cred) {
+        var authEventGen = 0;
+        var redirectSettled = fbAuth.getRedirectResult().then(function (cred) {
           var u = cred && cred.user;
+          var triedRedirect = consumeGoogleRedirect();
           if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut();
           if (fbDb && u) {
             return ensurePublicProfile(u, '', {
@@ -6528,29 +6600,44 @@
               createdAt: firebase.firestore.FieldValue.serverTimestamp()
             });
           }
-        }).catch(function () {});
+          if (triedRedirect && !u) showGoogleRedirectMiss();
+        }).catch(function (e) {
+          console.warn('redirect result', e);
+          if (consumeGoogleRedirect()) showGoogleRedirectMiss();
+        });
+        var redirectDone = Promise.resolve(redirectSettled).catch(function () {});
         fbAuth.onAuthStateChanged(function (user) {
-          var q=authQ;authQ='';if(!user&&q)openAuth(q);
-          if (user) applyFbUser(user);
-          else {
-            stopPreviewLift();
-            listenMemberNests(null);
-            listenBlocks(null);
-            teardownPeopleSocial();
-            if (currentUser && currentUser.live) {
-              currentUser = null;
-              saveJSON(LS_USER, null);
-              renderSidebarAuth();
-              hideDummyChrome();
-              teardownDms();
-              listenConversations();
-              syncProfile();
-              renderNotifs();
-              renderFeed();
-            } else {
-              renderWatchlist();
-            }
+          var q = authQ;
+          authQ = '';
+          var gen = ++authEventGen;
+          if (user) {
+            applyFbUser(user);
+            return;
           }
+          redirectDone.then(function () {
+            setTimeout(function () {
+              if (gen !== authEventGen) return;
+              if (fbAuth && fbAuth.currentUser) return;
+              if (q) openAuth(q);
+              stopPreviewLift();
+              listenMemberNests(null);
+              listenBlocks(null);
+              teardownPeopleSocial();
+              if (currentUser && currentUser.live) {
+                currentUser = null;
+                saveJSON(LS_USER, null);
+                renderSidebarAuth();
+                hideDummyChrome();
+                teardownDms();
+                listenConversations();
+                syncProfile();
+                renderNotifs();
+                renderFeed();
+              } else {
+                renderWatchlist();
+              }
+            }, 0);
+          });
         });
       }
       listenKillSwitch();
