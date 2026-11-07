@@ -36,7 +36,7 @@ function installStub(page) {
         }
         window.__googleCalls = [];
         window.__persistCalls = [];
-        window.__likes = {};
+        window.__likes = /preliked=1/.test(location.search) ? { 'email-user': true } : {};
         window.__likeUpdates = 0;
         var postListeners = [];
         var state = { user: null, listeners: [] };
@@ -332,6 +332,7 @@ test('guest Reply opens the sheet once, then focuses the reply after email sign-
   await expect(page.locator('#cv-auth-overlay')).toHaveClass(/open/);
   await emailSignIn(page);
   await expect(page.locator('#thoughts-compose-input')).toHaveAttribute('placeholder', 'Reply to this post…');
+  await expect(page.locator('#thoughts-compose-input')).toHaveValue('');
   await page.locator('[data-act="reply"]').first().click();
   await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
 });
@@ -409,4 +410,62 @@ test('private-mode persistence falls back from LOCAL to SESSION', async ({ page 
   await openLikeGate(page);
   await emailSignIn(page);
   await expect(page.locator('[data-act="like"]').first()).toHaveClass(/liked/);
+});
+
+const UNAVAILABLE = 'Sign-in is unavailable right now. Please reload.';
+
+test('replaying a Like does not remove a like that is already there', async ({ page }) => {
+  await installStub(page);
+  await page.goto('/?preliked=1');
+  await openLikeGate(page);
+  await emailSignIn(page);
+  const after = await page.evaluate(function () {
+    return { updates: window.__likeUpdates, likes: window.__likes };
+  });
+  expect(after.updates).toBe(0);
+  expect(after.likes['email-user']).toBe(true);
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  await page.locator('[data-act="like"]').first().click();
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  const toggled = await page.evaluate(function () {
+    return { updates: window.__likeUpdates, likes: window.__likes };
+  });
+  expect(toggled.updates).toBe(1);
+  expect(toggled.likes['email-user']).toBeUndefined();
+});
+
+test('Join, Like, and Reply say sign-in is unavailable when Firebase does not start', async ({ page }) => {
+  await page.route('**/firebase-web-config.json', function (route) {
+    return route.fulfill({ status: 500, contentType: 'text/plain', body: 'nope' });
+  });
+  await page.goto('/');
+  await page.waitForFunction(function () {
+    var err = document.getElementById('thoughts-compose-err');
+    return !!(err && err.textContent && err.textContent.indexOf('Feed is not connected') !== -1);
+  });
+  const signIn = page.locator('#auth-signin');
+  const vp = page.viewportSize();
+  if (vp && vp.width <= 900) await page.locator('#hamburger').click();
+  await signIn.click();
+  await expect(page.locator('#thoughts-compose-err')).toHaveText(UNAVAILABLE);
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  if (vp && vp.width <= 900) await page.locator('#hamburger').click();
+  await page.evaluate(function () {
+    var feed = document.getElementById('thoughts-feed');
+    var art = document.createElement('article');
+    art.setAttribute('data-post-id', 'post1');
+    art.innerHTML = '<button class="post-action" data-act="like" type="button">Like</button><button class="post-action" data-act="reply" type="button">Reply</button>';
+    feed.appendChild(art);
+  });
+  await page.locator('[data-act="like"]').first().click();
+  await expect(page.locator('#thoughts-compose-err')).toHaveText(UNAVAILABLE);
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  await page.locator('[data-act="reply"]').first().click();
+  await expect(page.locator('#thoughts-compose-input')).toHaveAttribute('placeholder', 'What still plays?');
+  await expect(page.locator('#thoughts-compose-err')).toHaveText(UNAVAILABLE);
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  if (vp && vp.width <= 900) await page.locator('#hamburger').click();
+  await signIn.click();
+  await expect(page.locator('#cv-auth-overlay')).not.toHaveClass(/open/);
+  await expect(page.locator('#thoughts-compose-err')).toHaveText(UNAVAILABLE);
 });
