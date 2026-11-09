@@ -137,23 +137,25 @@
 
   const FB_WEB_CONFIG_URL = 'https://subx-skins.web.app/firebase-web-config.json';
 
-  function chooseAuthPersistence(auth) {
-    var P = firebase.auth && firebase.auth.Auth && firebase.auth.Auth.Persistence;
-    var modes = P ? [P.LOCAL, P.SESSION, P.NONE] : [];
-    function step(i) {
-      if (!auth || !auth.setPersistence || i >= modes.length || !modes[i]) return Promise.resolve();
-      var result;
-      try { result = auth.setPersistence(modes[i]); }
+  var authPersistPromise = Promise.resolve();
+
+  function setAuthPersistence(auth) {
+    var P = firebase.auth.Auth.Persistence;
+    var modes = [P.LOCAL, P.SESSION, P.NONE];
+    function attempt(i) {
+      if (!auth || i >= modes.length) return Promise.resolve();
+      var pending;
+      try { pending = auth.setPersistence(modes[i]); }
       catch (e) {
-        console.warn('auth persistence', e);
-        return step(i + 1);
+        console.warn('auth persistence', modes[i], e);
+        return attempt(i + 1);
       }
-      return Promise.resolve(result).catch(function (e) {
-        console.warn('auth persistence', e);
-        return step(i + 1);
+      return Promise.resolve(pending).catch(function (e2) {
+        console.warn('auth persistence', modes[i], e2);
+        return attempt(i + 1);
       });
     }
-    return step(0);
+    return attempt(0);
   }
 
   function initFirebaseFromHostedConfig() {
@@ -175,15 +177,13 @@
           appId: cfg.appId
         });
         fbAuth = firebase.auth();
-        var persist = chooseAuthPersistence(fbAuth);
+        authPersistPromise = setAuthPersistence(fbAuth);
         fbDb = firebase.firestore();
         fbStorage = firebase.storage();
         try {
           if (cfg.appCheckSiteKey) firebase.appCheck().activate(cfg.appCheckSiteKey, true);
         } catch (e2) { console.warn('app-check', e2); }
-        return Promise.resolve(persist).catch(function (ePersist) {
-          console.warn('auth persistence', ePersist);
-        });
+        return authPersistPromise;
       })
       .catch(function (e) { console.warn('subx-skins init', e); });
   }
@@ -345,36 +345,6 @@
   }
   function ageGateMessage() {
     return 'Confirm you are ' + siteMinAge() + ' or older and agree to the Terms and Privacy pages.';
-  }
-  var GOOGLE_REDIRECT_MSG = 'Google sign-in did not finish. Allow popups for this site and try again.';
-  function markGoogleRedirect() {
-    try { sessionStorage.setItem('subx.googleRedirect', '1'); } catch (e) {}
-  }
-  function consumeGoogleRedirect() {
-    try {
-      var on = sessionStorage.getItem('subx.googleRedirect') === '1';
-      if (on) sessionStorage.removeItem('subx.googleRedirect');
-      return on;
-    } catch (e) { return false; }
-  }
-  function showGoogleRedirectMiss() {
-    if (isLiveUser()) return;
-    var err = document.getElementById('cv-login-err');
-    if (err) {
-      err.textContent = GOOGLE_REDIRECT_MSG;
-      err.classList.add('show');
-    }
-    openAuth('join');
-  }
-  function rememberAuthAct(act) {
-    pendingAuthAct = act;
-  }
-  function replayAuthAct() {
-    var act = pendingAuthAct;
-    pendingAuthAct = null;
-    if (!act || !isLiveUser()) return;
-    if (act.kind === 'like') toggleLike(act.postId);
-    else if (act.kind === 'reply') beginReply(act.postId);
   }
   function paintAgeLabels() {
     var n = String(siteMinAge());
@@ -1073,6 +1043,134 @@
     return !!(fbAuth && fbAuth.currentUser);
   }
 
+  var authStateKnown = false;
+  var authBootFailed = false;
+  var redirectSettled = false;
+  var signedOutApplied = false;
+  var authOpenWhenReady = false;
+  var deferredAuthMsg = '';
+  var deferredAuthQ = '';
+  var pendingAuthAction = null;
+  var flushingAuth = false;
+  var AUTH_ACTION_KEY = 'subx.authAction';
+  var GOOGLE_REDIRECT_KEY = 'subx.googleRedirect';
+  var AUTH_ACTION_MS = 10 * 60 * 1000;
+
+  function authReadyForGate() {
+    return !!(authStateKnown && redirectSettled);
+  }
+  function storageSet(store, key, val) {
+    try { store.setItem(key, val); } catch (e) {}
+  }
+  function storageGet(store, key) {
+    try { return store.getItem(key); } catch (e) { return null; }
+  }
+  function storageDel(store, key) {
+    try { store.removeItem(key); } catch (e) {}
+  }
+  function rememberGoogleRedirect() {
+    storageSet(sessionStorage, GOOGLE_REDIRECT_KEY, '1');
+    storageSet(localStorage, GOOGLE_REDIRECT_KEY, '1');
+  }
+  function peekGoogleRedirect() {
+    return storageGet(sessionStorage, GOOGLE_REDIRECT_KEY) === '1' || storageGet(localStorage, GOOGLE_REDIRECT_KEY) === '1';
+  }
+  function clearGoogleRedirect() {
+    storageDel(sessionStorage, GOOGLE_REDIRECT_KEY);
+    storageDel(localStorage, GOOGLE_REDIRECT_KEY);
+  }
+  function showAuthUnavailable() {
+    composeErr('Sign-in is unavailable right now. Please reload.');
+  }
+  function showGooglePopupBlocked(msg) {
+    var err = document.getElementById('cv-login-err');
+    if (!err) return;
+    err.textContent = msg || 'Google sign-in did not complete. Try again or use email.';
+    err.classList.add('show');
+  }
+  function clearAuthAction() {
+    pendingAuthAction = null;
+    storageDel(sessionStorage, AUTH_ACTION_KEY);
+    storageDel(localStorage, AUTH_ACTION_KEY);
+  }
+  function rememberAuthAction(desc) {
+    if (!desc || !desc.t || !desc.id) return;
+    pendingAuthAction = { t: desc.t, id: desc.id, at: Date.now() };
+    storageSet(sessionStorage, AUTH_ACTION_KEY, JSON.stringify(pendingAuthAction));
+  }
+  function readAuthAction() {
+    if (pendingAuthAction && pendingAuthAction.at && Date.now() - pendingAuthAction.at > AUTH_ACTION_MS) {
+      clearAuthAction();
+      return null;
+    }
+    if (pendingAuthAction) return pendingAuthAction;
+    var raw = storageGet(sessionStorage, AUTH_ACTION_KEY);
+    if (!raw) return null;
+    try {
+      var desc = JSON.parse(raw);
+      if (!desc || !desc.t || !desc.id || !desc.at || Date.now() - desc.at > AUTH_ACTION_MS) {
+        clearAuthAction();
+        return null;
+      }
+      pendingAuthAction = desc;
+      return desc;
+    } catch (e2) {
+      clearAuthAction();
+      return null;
+    }
+  }
+  function flushPendingAuthAction() {
+    if (flushingAuth || !isLiveUser()) return;
+    var desc = readAuthAction();
+    if (!desc) return;
+    flushingAuth = true;
+    clearAuthAction();
+    try {
+      if (desc.t === 'like') toggleLike(desc.id, true);
+      else if (desc.t === 'reply') startReply(desc.id);
+    } catch (e3) { console.warn('auth action', e3); }
+    flushingAuth = false;
+  }
+  function applySignedOut(q) {
+    if (signedOutApplied) {
+      if (q) openAuth(q);
+      return;
+    }
+    signedOutApplied = true;
+    stopPreviewLift();
+    listenMemberNests(null);
+    listenBlocks(null);
+    teardownPeopleSocial();
+    if (currentUser && currentUser.live) {
+      currentUser = null;
+      saveJSON(LS_USER, null);
+      renderSidebarAuth();
+      hideDummyChrome();
+      teardownDms();
+      listenConversations();
+      syncProfile();
+      renderNotifs();
+      renderFeed();
+    } else {
+      renderWatchlist();
+    }
+    if (q) openAuth(q);
+    else if (authOpenWhenReady || deferredAuthMsg) {
+      var msg = deferredAuthMsg;
+      deferredAuthMsg = '';
+      authOpenWhenReady = false;
+      if (msg) composeErr(msg);
+      openAuth('join');
+    }
+  }
+  function markRedirectSettled() {
+    redirectSettled = true;
+    if (!authStateKnown || isLiveUser()) return;
+    var q = deferredAuthQ;
+    deferredAuthQ = '';
+    applySignedOut(q);
+  }
+
   function sessionSeedPosts() { // factory-gp.js
     if (PLUGIN.sessionSeedPosts) return PLUGIN.sessionSeedPosts.apply(null, arguments);
     return [];
@@ -1093,7 +1191,6 @@
 
   var deepPostId = '';
   var authQ = '';
-  var pendingAuthAct = null;
   var deepPostDone = false;
   var shareSheetPostId = null;
 
@@ -1229,7 +1326,17 @@
       return false;
     }
     if (!isLiveUser()) {
-      gateErr('Sign in to ' + (action || 'post') + '. Guest can only browse.');
+      if (authBootFailed) {
+        showAuthUnavailable();
+        return false;
+      }
+      var signInMsg = 'Sign in to ' + (action || 'post') + '. Guest can only browse.';
+      if (!authReadyForGate()) {
+        authOpenWhenReady = true;
+        deferredAuthMsg = signInMsg;
+        return false;
+      }
+      gateErr(signInMsg);
       openAuth('join');
       return false;
     }
@@ -1608,7 +1715,6 @@
     if (!user.emailVerified) {
       composeErr('Verify your email before posting. Check your inbox, then refresh.');
     }
-    replayAuthAct();
   }
 
   function mapLive(doc) {
@@ -4721,19 +4827,29 @@
     }
   }
   function openAuth(tab) {
+    if (authBootFailed) {
+      showAuthUnavailable();
+      return;
+    }
     ensureJoinAuthLayout();
+    var modeHint = tab || 'join';
+    if (modeHint === 'login') modeHint = 'join';
+    if (modeHint === 'join' && isLiveUser()) {
+      closeAuth();
+      flushPendingAuthAction();
+      return;
+    }
+    if (modeHint === 'join' && !authReadyForGate()) {
+      authOpenWhenReady = true;
+      return;
+    }
     var draft = peekCompose();
     const ov = document.getElementById('cv-auth-overlay');
     if (!ov) return;
+    ov.classList.add('open');
     var mode = tab || 'join';
     if (mode === 'register' && !accountsOpen()) mode = 'join';
     if (mode === 'login') mode = 'join';
-    if (isLiveUser() && mode !== 'register') {
-      closeAuth();
-      replayAuthAct();
-      return;
-    }
-    ov.classList.add('open');
     var tabs = document.querySelector('#cv-auth-overlay .conv-modal-tabs');
     var login = document.getElementById('cv-panel-login');
     var reg = document.getElementById('cv-panel-register');
@@ -4785,6 +4901,7 @@
     listenMemberNests(null);
     teardownPeopleSocial();
     if (fbAuth && fbAuth.currentUser) fbAuth.signOut();
+    clearAuthAction();
     currentUser = null;
     saveJSON(LS_USER, null);
     renderSidebarAuth();
@@ -5064,15 +5181,20 @@
     });
   }
 
-  function toggleLike(postId) {
+  function toggleLike(postId, onlyLike) {
+    if (authBootFailed && !isLiveUser()) {
+      showAuthUnavailable();
+      return;
+    }
+    if (!isLiveUser()) rememberAuthAction({ t: 'like', id: postId });
     var uid = liveUid();
-    if (!isLiveUser()) rememberAuthAct({ kind: 'like', postId: postId });
     if (!requireVerified('like')) return;
     if (!uid) {
       composeErr('Sign in to like. Guest cannot like.');
       openAuth('join');
       return;
     }
+    composeErr('');
     if (!fbDb || !postId) return;
     var post = findPost(postId);
     if (isSessionSeedPost(post)) {
@@ -5080,6 +5202,7 @@
       return;
     }
     var likedBy = (post && post.likedBy) || {};
+    if (onlyLike && likedBy[uid]) return;
     var patch = {};
     if (likedBy[uid]) {
       patch['likes.' + uid] = firebase.firestore.FieldValue.delete();
@@ -5087,7 +5210,6 @@
       patch['likes.' + uid] = true;
     }
     fbDb.collection('posts').doc(postId).update(patch).then(function () {
-      composeErr('');
       if (!likedBy[uid] && post) sendNotif(post.authorUid, 'like', postId, '', 'like_' + postId + '_' + uid);
     }).catch(function (err) {
       composeErr((err && err.message) ? ('Like: ' + err.message) : 'Could not save like.');
@@ -5223,14 +5345,29 @@
    });
   }
 
-  function beginReply(postId) {
+  function startReply(postId) {
+    if (!postId) return;
+    if (!isLiveUser()) {
+      if (authBootFailed) {
+        showAuthUnavailable();
+        return;
+      }
+      rememberAuthAction({ t: 'reply', id: postId });
+      composeErr('Sign in to reply. Guest can only browse.');
+      openAuth('join');
+      return;
+    }
+    var post = null;
+    var nodes = document.querySelectorAll('[data-post-id]');
+    var i;
+    for (i = 0; i < nodes.length; i++) {
+      if (nodes[i].dataset.postId === postId) { post = nodes[i]; break; }
+    }
     composeErr('');
-    var safe = String(postId || '').replace(/"/g, '');
-    var postEl = safe ? document.querySelector('[data-post-id="' + safe + '"]') : null;
     var seedPost = findPost(postId);
     if (isSessionSeedPost(seedPost)) {
       replyTo = null;
-      var seedInput = document.getElementById('thoughts-compose-input');
+      const seedInput = document.getElementById('thoughts-compose-input');
       if (seedInput) {
         if (!seedInput.getAttribute('data-ph')) seedInput.setAttribute('data-ph', seedInput.placeholder);
         seedInput.placeholder = 'Answer the room…';
@@ -5238,8 +5375,8 @@
       }
       return;
     }
-    replyTo = (postEl && postEl.dataset.parentId) || postId;
-    var input = document.getElementById('thoughts-compose-input');
+    replyTo = (post && post.dataset.parentId) || postId;
+    const input = document.getElementById('thoughts-compose-input');
     if (!input) return;
     if (!input.getAttribute('data-ph')) input.setAttribute('data-ph', input.placeholder);
     input.placeholder = 'Reply to this post…';
@@ -5431,13 +5568,7 @@
      if (e.target.closest('[data-act="reply"]')) {
        const post = e.target.closest('[data-post-id]');
        if (!post) return;
-       if (!isLiveUser()) {
-         rememberAuthAct({ kind: 'reply', postId: post.dataset.postId });
-         composeErr('Sign in to reply. Guest can only browse.');
-         openAuth('join');
-         return;
-       }
-       beginReply(post.dataset.postId);
+       startReply(post.dataset.postId);
        return;
      }
      if (e.target.closest('[data-act="share"]')) {
@@ -5594,6 +5725,7 @@
    document.getElementById('cv-login-btn').addEventListener('click', function () {
      const err = document.getElementById('cv-login-err');
      runWithAuth(err, function () {
+       authPersistPromise.then(function () {
        const email = (document.getElementById('cv-login-email').value || '').trim();
        const pw = document.getElementById('cv-login-pw').value || '';
        err.textContent = '';
@@ -5602,11 +5734,13 @@
          err.textContent = (e && e.message) ? e.message : 'Sign-in failed.';
          err.classList.add('show');
        });
+       });
      });
    });
    document.getElementById('cv-reg-btn').addEventListener('click', function () {
      const err = document.getElementById('cv-reg-err');
      runWithAuth(err, function () {
+       authPersistPromise.then(function () {
        const name = (document.getElementById('cv-reg-name').value || '').trim();
        const email = (document.getElementById('cv-reg-email').value || '').trim();
        const pw = document.getElementById('cv-reg-pw').value || '';
@@ -5636,15 +5770,14 @@
          err.textContent = (e && e.message) ? e.message : 'Could not create account.';
          err.classList.add('show');
        });
+       });
      });
    });
    document.getElementById('cv-google-login').addEventListener('click', function () {
      var err = document.getElementById('cv-login-err');
      if (!fbAuth) {
-       if (err) {
-         err.textContent = 'Auth is not ready.';
-         err.classList.add('show');
-       }
+       err.textContent = 'Auth is not ready.';
+       err.classList.add('show');
        return;
      }
      if (!accountsOpen() && !document.documentElement.classList.contains('acc-stew')) { err.textContent = ACC_CLOSED; err.classList.add('show'); return; }
@@ -5657,8 +5790,10 @@
      err.textContent = '';
      err.classList.remove('show');
      markAuthLand();
+     clearGoogleRedirect();
      var provider = new firebase.auth.GoogleAuthProvider();
      function finishGoogle(cred) {
+       clearGoogleRedirect();
        var u = cred && cred.user;
        if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut().then(function () { throw new Error(ACC_CLOSED); });
        if (fbDb && u) {
@@ -5672,7 +5807,7 @@
        var msg;
        if (e && e.code === 'auth/operation-not-allowed') {
          msg = 'Google is not enabled on subx-skins yet.';
-       } else if (e && (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request')) {
+       } else if (e && e.code === 'auth/popup-closed-by-user') {
          msg = 'Google sign-in cancelled.';
        } else {
          msg = (e && e.message) ? e.message : 'Google sign-in failed.';
@@ -5680,13 +5815,19 @@
        err.textContent = msg;
        err.classList.add('show');
      }
-     // Popup must run in this turn. An await before it makes iOS Safari block the window.
+     function redirectGoogle() {
+       rememberGoogleRedirect();
+       showGooglePopupBlocked('Google popup sign-in could not open. Trying another sign-in method.');
+       return fbAuth.signInWithRedirect(provider).catch(function (e2) {
+         clearGoogleRedirect();
+         failGoogle(e2);
+       });
+     }
+     // Call popup in this tap. iOS Safari blocks it if this handler waits first.
      fbAuth.signInWithPopup(provider).then(finishGoogle).catch(function (e) {
-       if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment')) {
-         err.textContent = GOOGLE_REDIRECT_MSG;
-         err.classList.add('show');
-         markGoogleRedirect();
-         return fbAuth.signInWithRedirect(provider).catch(failGoogle);
+       var code = e && e.code;
+       if (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') {
+         return redirectGoogle();
        }
        failGoogle(e);
      });
@@ -6588,62 +6729,68 @@
     try { if (!sessionStorage.getItem('subx.hit.'+SITE_ID)) { sessionStorage.setItem('subx.hit.'+SITE_ID,'1'); sendPixel(); } } catch (e) {}
 
     fbReadyPromise.then(function () {
-      if (fbAuth) {
-        var authEventGen = 0;
-        var redirectSettled = fbAuth.getRedirectResult().then(function (cred) {
+      var wantedAuth = false;
+      if (!fbAuth) {
+        authBootFailed = true;
+        wantedAuth = !!(authOpenWhenReady || deferredAuthMsg || deferredAuthQ || readAuthAction());
+        authOpenWhenReady = false;
+        deferredAuthMsg = '';
+        deferredAuthQ = '';
+        clearAuthAction();
+      } else {
+        fbAuth.getRedirectResult().then(function (cred) {
           var u = cred && cred.user;
-          var triedRedirect = consumeGoogleRedirect();
-          if (u && !accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut();
-          if (fbDb && u) {
-            return ensurePublicProfile(u, '', {
-              provider: 'google',
-              createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            });
-          }
-          if (triedRedirect && !u) showGoogleRedirectMiss();
-        }).catch(function (e) {
-          console.warn('redirect result', e);
-          if (consumeGoogleRedirect()) showGoogleRedirectMiss();
-        });
-        var redirectDone = Promise.resolve(redirectSettled).catch(function () {});
-        fbAuth.onAuthStateChanged(function (user) {
-          var q = authQ;
-          authQ = '';
-          var gen = ++authEventGen;
-          if (user) {
-            applyFbUser(user);
+          if (u) {
+            clearGoogleRedirect();
+            if (!accountsOpen() && u.uid !== ADMIN_UID) return fbAuth.signOut();
+            if (fbDb) {
+              return ensurePublicProfile(u, '', {
+                provider: 'google',
+                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+              });
+            }
             return;
           }
-          redirectDone.then(function () {
-            setTimeout(function () {
-              if (gen !== authEventGen) return;
-              if (fbAuth && fbAuth.currentUser) return;
-              if (q) openAuth(q);
-              stopPreviewLift();
-              listenMemberNests(null);
-              listenBlocks(null);
-              teardownPeopleSocial();
-              if (currentUser && currentUser.live) {
-                currentUser = null;
-                saveJSON(LS_USER, null);
-                renderSidebarAuth();
-                hideDummyChrome();
-                teardownDms();
-                listenConversations();
-                syncProfile();
-                renderNotifs();
-                renderFeed();
-              } else {
-                renderWatchlist();
-              }
-            }, 0);
-          });
+          if (peekGoogleRedirect() && !(fbAuth && fbAuth.currentUser)) {
+            clearGoogleRedirect();
+            showGooglePopupBlocked();
+            authOpenWhenReady = true;
+          }
+        }).catch(function (e) {
+          console.warn('redirect result', e);
+          clearGoogleRedirect();
+          if (fbAuth && fbAuth.currentUser) return;
+          var el = document.getElementById('cv-login-err');
+          var msg = (e && e.message) ? e.message : 'Google sign-in failed.';
+          if (el) { el.textContent = msg; el.classList.add('show'); }
+          authOpenWhenReady = true;
+        }).then(function () { markRedirectSettled(); }, function () { markRedirectSettled(); });
+        fbAuth.onAuthStateChanged(function (user) {
+          authStateKnown = true;
+          var q = authQ;
+          authQ = '';
+          if (user) {
+            signedOutApplied = false;
+            authOpenWhenReady = false;
+            deferredAuthMsg = '';
+            deferredAuthQ = '';
+            applyFbUser(user);
+            flushPendingAuthAction();
+            return;
+          }
+          if (!redirectSettled) {
+            if (q) deferredAuthQ = q;
+            return;
+          }
+          applySignedOut(q || deferredAuthQ);
+          deferredAuthQ = '';
         });
       }
       listenKillSwitch();
       listenHides();
       listenLivePosts();
       initStories();
+      if (wantedAuth) showAuthUnavailable();
     });
   }
 
