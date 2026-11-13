@@ -1,36 +1,40 @@
-# 27chat robots.txt
-# Story pages under /stories/ may be indexed (approved 2026-10-21).
-# Everything else stays out of search.
+# 27chat robots.txt · public beta (lock lifted)
+# Search indexing allowed. Story pages under /stories/ stay indexed (approved 2026-10-21); sitemap-stories.xml is kept.
 # Do not scrape or use any content for AI training (named bots below stay blocked).
+# Operated by SubX, LLC. Agent rules: https://27chat.com/terms.html
+# Contact: takedown@subx.it
 
 User-agent: *
+Allow: /
 Allow: /stories/
-Allow: /styles.css
-Allow: /favicon.svg
-Disallow: /
+Disallow: /preview-lift/
 
-# AI answer/search bots may reach /stories/ only.
+# answer/search fetchers allowed for citation; training crawlers blocked per Terms (no model training).
 User-agent: OAI-SearchBot
+Allow: /
 Allow: /stories/
-Disallow: /
+Disallow: /preview-lift/
 
 User-agent: ChatGPT-User
+Allow: /
 Allow: /stories/
-Disallow: /
+Disallow: /preview-lift/
 
 User-agent: PerplexityBot
+Allow: /
 Allow: /stories/
-Disallow: /
+Disallow: /preview-lift/
 
 User-agent: Claude-SearchBot
+Allow: /
 Allow: /stories/
-Disallow: /
+Disallow: /preview-lift/
 
 User-agent: Claude-User
+Allow: /
 Allow: /stories/
-Disallow: /
+Disallow: /preview-lift/
 
-# AI training crawlers stay fully blocked, including /stories/.
 User-agent: GPTBot
 User-agent: CCBot
 User-agent: Google-Extended
@@ -44,4 +48,8 @@ User-agent: Diffbot
 User-agent: omgili
 Disallow: /
 
+# Note: no Allow line for /llms.txt. The file is fetchable directly; robots.txt does not need to
+# carve it out.
+
+Sitemap: https://27chat.com/sitemap.xml
 Sitemap: https://27chat.com/sitemap-stories.xml
