@@ -1,11 +1,11 @@
-# 27chat.com (Preview only. Not open for public registration.)
+# 27chat.com (Public beta.)
 # WHOMARK: HYBRID-HUMAN-AI-STEWARD
 # By Jebb Dykstra, Juno, Vesta and Iris
 
 # About 27chat: The work didn't stop.
 
 
-**Preview status:** Preview only.
+**Index status:** Public beta. Search indexing is open on public pages except report.html and 404.html.
 
 27chat is an unofficial community room about unfinished work: songs, poems, paintings, performances, and builder artifacts that still play. SubX talks about the records, the canvases, the studio takes, the lines on the page, and the verifiable craft behind creative and internet work, not how anyone left, not a club, and not a shrine. The work didn't stop.
 
