@@ -1,22 +1,22 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:          #141218;
-  --surface:          #1c1822;
+  --bg:          #ffffff;
+  --surface:          #f7f9f9;
   --nav-bg:          #0c0a10;
   --nav-text:     #9a9088;
   --nav-hover:     #f0ebe6;
   --nav-active:     #f0ebe6;
-  --text:          #f0ebe6;
-  --text-muted:     #9a9088;
-  --text-light:     #9a9088;
-  --accent:          #c4a574;
-  --accent-dark:     #8b6d3f;
-  --gold:          #c4a574;
-  --delay:          #c4a574;
-  --teal:          #c4a574;
-  --silver:          #9a9088;
-  --border:          #2e2834;
+  --text:          #0f1419;
+  --text-muted:     #536471;
+  --text-light:     #536471;
+  --accent:          #8c6d3c;
+  --accent-dark:     #6f5730;
+  --gold:          #8c6d3c;
+  --delay:          #8c6d3c;
+  --teal:          #8c6d3c;
+  --silver:          #cfd9de;
+  --border:          #eff3f4;
   --nav-w:          275px;
   --right-w:          330px;
   --ui:          Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -591,7 +591,7 @@ body.right-collapsed .right-panel-tab svg { transform: scaleX(1); }
 .post-image {
   margin-top: 0.7rem;
   border-radius: 10px; overflow: hidden;
-  border: 1px solid var(--border);
+  border: 1px solid var(--silver);
 }
 .post-image img {
   width: 100%; max-height: 420px; object-fit: contain;
@@ -1491,3 +1491,5 @@ body.legal-page {
 .news-page-list .our-articles li { border-top-color: var(--border); }
 .news-page-list .our-articles a { color: var(--text); }
 .news-page-list .our-articles-meta { color: var(--text-muted); }
+/* Light Mode (Nov 14 2026): the rail stays on the dark nav-bg, so rail story links use the light nav text */
+.right-panel .news-item-stories .news-item-story { color: var(--nav-hover); }
