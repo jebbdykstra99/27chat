@@ -6,20 +6,20 @@
   "composePlaceholder": "What still plays?",
   "emptyState": "This room is empty. Sign in with email to say what still plays. Guest can browse only.",
   "theme": {
-    "bg": "#141218",
-    "surface": "#1c1822",
+    "bg": "#ffffff",
+    "surface": "#f7f9f9",
     "nav-bg": "#0c0a10",
     "nav-text": "#9a9088",
     "nav-hover": "#f0ebe6",
     "nav-active": "#f0ebe6",
-    "text": "#f0ebe6",
-    "text-muted": "#9a9088",
-    "text-light": "#9a9088",
-    "accent": "#c4a574",
-    "accent-dark": "#8b6d3f",
-    "teal": "#c4a574",
-    "silver": "#9a9088",
-    "border": "#2e2834",
+    "text": "#0f1419",
+    "text-muted": "#536471",
+    "text-light": "#536471",
+    "accent": "#8c6d3c",
+    "accent-dark": "#6f5730",
+    "teal": "#8c6d3c",
+    "silver": "#cfd9de",
+    "border": "#eff3f4",
     "avatarColors": [
       "#c4a574",
       "#8b6d3f",
@@ -28,8 +28,8 @@
       "#3a3238",
       "#6e5a42"
     ],
-    "gold": "#c4a574",
-    "delay": "#c4a574"
+    "gold": "#8c6d3c",
+    "delay": "#8c6d3c"
   },
   "trends": [
     {
@@ -272,6 +272,41 @@
     "label": "New story",
     "text": "Kurt Cobain: Aberdeen to Nevermind and Unplugged",
     "url": "/stories/05-kurt-cobain/"
+  },
+  "featured": {
+    "featuredDays": 3,
+    "maxPinned": 3,
+    "articleMinChars": 600,
+    "label": "Our articles",
+    "handles": [
+      "wahwah",
+      "songcraft",
+      "mixnotes",
+      "catalograil",
+      "listeningdesk",
+      "crownpaint",
+      "backtoblack",
+      "covercraft",
+      "unfinishedwork",
+      "voicedesk",
+      "sessionfloor",
+      "registrydesk",
+      "vinylnight",
+      "bluenight",
+      "takedesk",
+      "lowendlog",
+      "crossroads",
+      "dubplate",
+      "econodesk",
+      "jynxtape",
+      "iveysline",
+      "blindowldesk",
+      "pearlvoice",
+      "doorspoet",
+      "nevermindtape",
+      "deltawire",
+      "stonefounder"
+    ]
   },
   "rail": {
     "kind": "porch",
